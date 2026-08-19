@@ -310,16 +310,21 @@ function inspectFunc(x, y) {
 
 // Ask the harness to start the local relay if it isn't running. The extension
 // cannot spawn processes, so it calls the harness's /api/_relay/start hook.
+// Returns true when the relay is (or became) reachable; the caller always
+// attempts the socket regardless, because the harness hook may be missing
+// (harness not restarted) while the relay itself is already up.
 async function ensureRelay() {
-  if (settings.autoStartRelay === false) return true;
+  if (settings.autoStartRelay === false) return wsReachable();
   try {
     const res = await fetch(`${settings.harnessUrl}/api/_relay/start`, { method: "POST", cache: "no-store" });
-    if (!res.ok) return false;
-    const body = await res.json().catch(() => null);
-    return !!(body && body.ok);
+    if (res.ok) {
+      const body = await res.json().catch(() => null);
+      if (body && body.ok) return true;
+    }
   } catch {
-    return false; // harness unreachable — just try the WS anyway
+    // harness unreachable — fall through and just try the socket
   }
+  return wsReachable();
 }
 
 async function connect() {
@@ -717,17 +722,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     connect();
     sendResponse({ state: "connecting", ...currentState() });
   } else if (msg && msg.type === "start-relay") {
-    // Popup's explicit "Start relay" button: call the harness hook, then
-    // connect if the relay comes up.
-    ensureRelay().then((ok) => {
-      if (ok) {
-        intent = true;
-        try { if (ws) ws.close(); } catch {}
-        openSocket();
-        sendResponse({ state: "connecting", ...currentState() });
-      } else {
-        sendResponse({ state: "disconnected", relayError: "relay did not start", ...currentState() });
-      }
+    // Popup's explicit "Start relay" button: ask the harness to start the
+    // relay, then always try to connect — the relay may already be up even
+    // when the harness hook is missing.
+    ensureRelay().then(() => {
+      intent = true;
+      try { if (ws) ws.close(); } catch {}
+      openSocket();
+      sendResponse({ state: "connecting", ...currentState() });
     });
     return true; // async
   } else if (msg && msg.type === "disconnect") {
