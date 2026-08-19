@@ -449,7 +449,7 @@ async function dispatchAction(msg, reply) {
     case "status": return currentState();
     case "snap": return await run(snapFunc, []);
     case "page": return await run(pageFunc, []);
-    case "eval": return await run(evalFunc, [String(msg.code ?? "")]);
+    case "eval": return await evalViaCdp(tab.id, String(msg.code ?? ""));
     case "scroll": return await run(scrollFunc, [Number(msg.dx || 0), Number(msg.dy || 0), String(msg.behavior || "auto")]);
     case "inspect": return await run(inspectFunc, [Number(msg.x), Number(msg.y)]);
     case "dialog": return await run(dialogFunc, []);
@@ -592,6 +592,40 @@ function cdpScreenshot(tabId, format) {
         if (!res || !res.data) return reject(new Error("no screenshot data"));
         resolve(`data:image/png;base64,${res.data}`);
       });
+    });
+  });
+}
+
+// Run arbitrary JS in the page's main world via CDP. Unlike the isolated
+// world, Runtime.evaluate is not subject to the page's (or the extension's)
+// CSP, so eval works even on strict pages. The page context is real: the
+// code sees the page's own JS globals, not the isolated world's.
+function evalViaCdp(tabId, code) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.attach({ tabId }, "1.3", () => {
+      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+      chrome.debugger.sendCommand(
+        { tabId },
+        "Runtime.evaluate",
+        { expression: code, returnByValue: true, awaitPromise: true },
+        (res) => {
+          chrome.debugger.detach({ tabId }, () => {});
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          if (!res) return reject(new Error("no eval result"));
+          if (res.exceptionDetails) {
+            const detail = res.exceptionDetails.exception?.description || res.exceptionDetails.text || "exception";
+            return resolve({ ok: false, error: detail });
+          }
+          const r = res.result;
+          if (r?.type === "undefined" || r?.type === "symbol" || r?.type === "function") {
+            return resolve({ ok: true, value: null, type: r.type });
+          }
+          if (r?.type === "object" && !r.value) {
+            return resolve({ ok: true, value: null, type: "object" });
+          }
+          return resolve({ ok: true, value: r?.value ?? r?.description ?? null, type: r?.type });
+        }
+      );
     });
   });
 }
