@@ -37,6 +37,9 @@
     #disconnect { background: #e8e6dd; color: #9b2c2c; }
     #disconnect:hover { background: #f4e3e3; }
     @media (prefers-color-scheme: dark) { #disconnect { background: #2b2d28; } }
+    #startRelay { background: #f4f3ee; color: #0f1419; border: 1px solid rgba(15,20,25,.18); }
+    #startRelay:hover { background: #ecebe4; }
+    @media (prefers-color-scheme: dark) { #startRelay { background: #2b2d28; color: #e8e6dd; } }
     .secondary {
       width: 100%; margin-top: 10px; padding: 6px; border: 0; border-radius: 6px;
       background: transparent; color: #00a3a3; font-size: 11.5px; cursor: pointer; text-decoration: underline;
@@ -51,9 +54,10 @@
   <div class="row"><span>Profile</span><b id="profile">default</b></div>
   <div class="row"><span>Relay</span><b id="relay">ws://127.0.0.1:8756</b></div>
   <button id="connect" hidden>Connect</button>
+  <button id="startRelay" hidden>Start relay, then connect</button>
   <button id="disconnect" hidden>Disconnect</button>
   <button id="settings" class="secondary">Settings</button>
-  <p class="hint" id="hint" hidden>Connect is the handshake. This profile only shows up on the relay after you click it.</p>
+  <p class="hint" id="hint" hidden>Connect is the handshake. If the relay isn't running, Pilot starts it for you.</p>
   <script src="popup.js"></script>
 </body>
 </html>

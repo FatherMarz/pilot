@@ -1,6 +1,7 @@
 const label = document.getElementById("label");
 const statusEl = document.getElementById("status");
 const connectBtn = document.getElementById("connect");
+const startRelayBtn = document.getElementById("startRelay");
 const disconnectBtn = document.getElementById("disconnect");
 const settingsBtn = document.getElementById("settings");
 const hint = document.getElementById("hint");
@@ -15,8 +16,10 @@ function render(state) {
     ? "Connected to harness"
     : state.intent
       ? "Connecting…"
-      : "Disconnected — click Connect to handshake";
-  connectBtn.hidden = state.connected;
+      : "Disconnected";
+  connectBtn.hidden = state.connected || state.intent;
+  // The relay may be down: offer to start it (Connect already auto-starts it).
+  startRelayBtn.hidden = state.connected || state.intent;
   disconnectBtn.hidden = !state.connected;
   hint.hidden = state.connected || state.intent;
   if (state.profile) profileEl.textContent = state.profile;
@@ -25,6 +28,13 @@ function render(state) {
 
 connectBtn.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "connect" }, (r) => render(r || {}));
+});
+startRelayBtn.addEventListener("click", () => {
+  startRelayBtn.textContent = "Starting relay…";
+  chrome.runtime.sendMessage({ type: "start-relay" }, (r) => {
+    startRelayBtn.textContent = "Start relay, then connect";
+    render(r || {});
+  });
 });
 disconnectBtn.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "disconnect" }, (r) => render(r || {}));

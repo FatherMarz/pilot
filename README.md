@@ -64,7 +64,29 @@ they work without focusing the tab.
 
 ```sh
 node cli.js --status                                  # who is connected
-node cli.js '{"action":"snap"}'                       # page snapshot (title, url, text, clickable items)
+
+# Tabs & windows — read-only, never touch your active tab
+node cli.js '{"action":"tabs"}'                       # every tab: url, title, group, window, pinned, muted, active
+node cli.js '{"action":"windows"}'                    # every window: focused, type, state, size
+node cli.js '{"action":"groups"}'                     # every tab group: title, color, window, collapsed
+node cli.js '{"action":"activeTab"}'                  # what YOU are looking at right now (so the agent avoids it)
+node cli.js '{"action":"tabInfo","tabId":123}'        # one tab's details
+
+# Tab management — target the driven tab unless you pass tabId
+node cli.js '{"action":"newHarnessTab","url":"https://x"}'  # background tab in the Harness group
+node cli.js '{"action":"closeTab","tabId":123}'       # close a tab
+node cli.js '{"action":"duplicate","tabId":123}'      # duplicate a tab
+node cli.js '{"action":"pin","tabId":123}' / '{"action":"unpin","tabId":123}'
+node cli.js '{"action":"reloadTab","tabId":123}'      # reload a tab
+
+# Read a page — deep
+node cli.js '{"action":"snap"}'                       # quick snapshot (title, url, text, clickable items)
+node cli.js '{"action":"page"}'                       # deep: meta, headings, links, forms, images, text
+node cli.js '{"action":"eval","code":"document.title"}'      # run JS in the page, JSON-safe result
+node cli.js '{"action":"scroll","dy":800}'            # scroll; returns new position
+node cli.js '{"action":"inspect","x":100,"y":200}'    # what element is under a point (tag, text, rect, attrs)
+
+# Interact
 node cli.js '{"action":"click","sel":"button.x"}'     # click by CSS selector
 node cli.js '{"action":"clickText","text":"Save"}'    # click by visible text
 node cli.js '{"action":"clickXY","x":100,"y":200}'    # click at coordinates
@@ -75,12 +97,22 @@ node cli.js '{"action":"fill","sel":"#name","value":"Ada"}'
 node cli.js '{"action":"form"}'                       # inputs/selects/radios in the open dialog
 node cli.js '{"action":"dialog"}'                     # open dialog text
 node cli.js '{"action":"findText","text":"Save"}'     # locate text on the page
-node cli.js '{"action":"tabs"}'                       # list all tabs
 node cli.js '{"action":"navigate","url":"https://x"}' # go to a URL
 node cli.js '{"action":"shot"}'                       # screenshot → saved to ~/.pilot/shots/
 node cli.js '{"action":"shot"}' --out /tmp/x.jpg
 node cli.js '{"action":"reload"}'                     # reload the extension
 ```
+
+### Tab targeting rules
+
+- **No `tabId` in a command** → Pilot drives the Harness-grouped background
+  tab (finds an existing one, or creates a fresh background tab). It **never**
+  hijacks your active tab.
+- **`tabId` given** → that exact tab.
+- Read-only actions (`tabs`, `windows`, `groups`, `activeTab`, `snap`, `page`,
+  `eval`, `scroll`, `inspect`, `shot`) never bring a tab forward, even with
+  "bring forward" enabled. Only real interactions (`click`, `type`, `key`,
+  `navigate`, …) do, and only when you opted in.
 
 Every command accepts `--profile NAME` to pick which Chrome profile handles it.
 Commands sent to a profile that isn't connected are queued on the relay and

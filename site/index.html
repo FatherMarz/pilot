@@ -119,13 +119,12 @@
       <h1>Pilot</h1>
       <p class="lede">A local bridge so any agent harness can <strong>drive your Chrome</strong> — clicks, keys, typing, tabs, and small screenshots — <strong>without stealing your window</strong>. You stay in control: clicking <strong>Connect</strong> in the popup is the handshake, every time.</p>
       <a class="btn" href="https://github.com/FatherMarz/pilot">Get Pilot</a>
-      <a class="btn ghost" href="https://github.com/FatherMarz/pilot#readme">Read the docs</a>
+      <button class="btn ghost" id="copyLlmTop">Copy for LLM</button>
     </div>
   </div>
 
-  <div class="grid2">
-    <div class="tile">
-      <h2><span class="n">01</span>You are the password</h2>
+  <div class="tile">
+    <h2><span class="n">01</span>You are the password</h2>
       <p>The relay is localhost-only. A Chrome profile appears on it only after you click <strong>Connect</strong> in the Pilot popup — and disappears when you click <strong>Disconnect</strong> or close Chrome. No auto-reconnect, no background bots.</p>
       <p>Use different Chrome profiles for different jobs. Give each one a name, and the harness targets the right one:</p>
       <pre><code><span class="c"># work profile, personal profile — same machine, same relay</span>
@@ -133,11 +132,10 @@ node cli.js '{"action":"click","text":"Deploy"}' --profile work
 node cli.js '{"action":"shot"}' --profile personal</code></pre>
     </div>
 
-    <div class="tile">
-      <h2><span class="n">02</span>Works in the background</h2>
+  <div class="tile">
+    <h2><span class="n">02</span>Works in the background</h2>
       <p>Commands run via <code>chrome.scripting.executeScript</code>, which works on inactive tabs. The harness clicks, types, and snapshots a background tab while you keep working. Driven tabs get a red <strong>Harness</strong> group so you can always see what the agent is touching.</p>
       <p>Background-tab screenshots use the Chrome DevTools Protocol — no tab activation needed. Screenshots are downscaled small so the harness can read them fast.</p>
-    </div>
   </div>
 
   <div class="tile">
@@ -179,6 +177,12 @@ chrome://extensions  →  Developer mode  →  Load unpacked  →  extension/
 node cli.js '{"action":"snap"}'</code></pre>
   </div>
 
+  <div class="tile">
+    <h2><span class="n">06</span>Give it to an LLM</h2>
+    <p>Copy the install + usage instructions and paste them into any agent harness — it will know how to drive your Chrome.</p>
+    <button class="btn" id="copyLlm">Copy for LLM</button>
+  </div>
+
   <footer>
     <span>Pilot · local · open source · made for modul4r</span>
   </footer>
@@ -195,6 +199,62 @@ node cli.js '{"action":"snap"}'</code></pre>
     localStorage.setItem("pilot-theme", next);
     apply(next);
   });
+
+  // Copy-for-LLM: the full install + usage instructions, ready to paste into
+  // any agent harness. Both the hero button and the 06 tile use it.
+  const LLM_INSTRUCTIONS = `Pilot — let an agent harness drive Chrome.
+
+Pilot is a local bridge: a Chrome extension + a relay + a CLI. The harness commands the CLI, the CLI talks to the relay, the relay routes to a connected Chrome profile, and the extension clicks/types/snapshots the page. It works on background tabs and does not steal the user's window.
+
+Install (once):
+1. Clone https://github.com/FatherMarz/pilot and cd into it.
+2. Run the relay: node server.js  (it listens on 127.0.0.1:8756).
+3. Load the extension: open chrome://extensions, enable Developer mode, click "Load unpacked", and select the extension/ folder. Pin Pilot to the toolbar.
+4. Click Connect in the Pilot popup — that click is the handshake. A profile only appears on the relay after the user clicks Connect. Ask the user to click it if no profile shows up.
+
+Drive it from the CLI (run from the pilot repo dir):
+- node cli.js --status                       # who is connected
+- node cli.js '{"action":"snap"}'            # page snapshot: title, url, text, clickable items
+- node cli.js '{"action":"click","sel":"button.x"}'
+- node cli.js '{"action":"clickText","text":"Save"}'   # add "exact":true for exact match
+- node cli.js '{"action":"clickXY","x":100,"y":200}'
+- node cli.js '{"action":"type","text":"hello"}'        # into the focused composer
+- node cli.js '{"action":"type","sel":"#msg","text":"hi"}'
+- node cli.js '{"action":"fill","sel":"#name","value":"Ada"}'
+- node cli.js '{"action":"key","key":"Enter"}'          # meta: "meta":true, shift: "shift":true
+- node cli.js '{"action":"dialog"}'           # open dialog text
+- node cli.js '{"action":"form"}'             # inputs/selects/radios/errors in the open dialog
+- node cli.js '{"action":"findText","text":"Save"}'
+- node cli.js '{"action":"tabs"}'
+- node cli.js '{"action":"navigate","url":"https://example.com"}'
+- node cli.js '{"action":"shot"}' --out /tmp/page.jpg   # small screenshot, saved to disk, path printed
+
+Every command accepts --profile NAME to pick a Chrome profile (default: default).
+
+Read screenshots locally, no vision API key:
+- ./ocr /tmp/page.jpg          # plain text lines (macOS Vision, on-device)
+- ./ocr /tmp/page.jpg --json   # boxes + confidence
+
+Workflow: look before you click (snap first), then one action at a time, then snap/dialog to confirm the result. Commands to a profile that isn't connected are queued and delivered when the user clicks Connect.`;
+
+  function wireCopy(buttonId) {
+    const el = document.getElementById(buttonId);
+    if (!el) return;
+    el.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(LLM_INSTRUCTIONS);
+        const original = el.textContent;
+        el.textContent = "Copied ✓";
+        setTimeout(() => { el.textContent = original; }, 1600);
+      } catch {
+        const original = el.textContent;
+        el.textContent = "Copy failed";
+        setTimeout(() => { el.textContent = original; }, 1600);
+      }
+    });
+  }
+  wireCopy("copyLlmTop");
+  wireCopy("copyLlm");
 
   // Live relay status — only meaningful on the machine running the relay.
   const live = document.getElementById("live");

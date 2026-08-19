@@ -17,8 +17,10 @@
 
 const DEFAULT_SETTINGS = {
   relayUrl: "ws://127.0.0.1:8756",
+  harnessUrl: "http://127.0.0.1:3080",
   profileName: "default",
   focusOnAction: false,
+  autoStartRelay: true,
   shotMaxWidth: 1280,
   shotFormat: "jpeg", // "jpeg" | "png"
   shotQuality: 0.82,
@@ -232,11 +234,115 @@ function formFunc() {
     errors: (scope.innerText.match(/[Ee]rror[^\n]{0,100}|required[^\n]{0,100}|must[^\n]{0,100}/g) || []).slice(0, 5),
   };
 }
+// Deep page snapshot: metadata, headings, links, forms, images, text.
+function pageFunc() {
+  const meta = {};
+  for (const m of document.querySelectorAll("meta")) {
+    const key = m.name || m.getAttribute("property") || "";
+    if (key && !meta[key]) meta[key] = (m.content || "").slice(0, 300);
+  }
+  const head = (el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 100);
+  return {
+    title: document.title,
+    url: location.href,
+    meta,
+    lang: document.documentElement.lang || "",
+    headings: [...document.querySelectorAll("h1,h2,h3")].map(head).filter(Boolean).slice(0, 40),
+    links: [...document.querySelectorAll("a[href]")]
+      .map((a) => ({ text: head(a), href: a.href }))
+      .filter((l) => l.href && !l.href.startsWith("javascript:"))
+      .slice(0, 120),
+    forms: [...document.querySelectorAll("form")].map((f) => ({
+      action: f.action || "", method: f.method || "get",
+      fields: [...f.querySelectorAll("input,select,textarea,button")].map((i) => ({
+        tag: i.tagName.toLowerCase(), name: i.name || i.id || "", type: i.type || "",
+        placeholder: i.placeholder || "", value: (i.value || "").slice(0, 40),
+        text: head(i),
+      })).slice(0, 30),
+    })).slice(0, 15),
+    images: [...document.querySelectorAll("img[src]")].map((i) => ({
+      src: i.currentSrc || i.src || "", alt: i.alt || "", w: i.naturalWidth, h: i.naturalHeight,
+    })).filter((i) => i.src && i.src.startsWith("http")).slice(0, 40),
+    text: (document.body && document.body.innerText || "").slice(0, 5000),
+  };
+}
+// Arbitrary JS in the page context. Result is JSON-serialized (objects) or a
+// short string; errors come back with their message.
+function evalFunc(code) {
+  try {
+    const value = (0, eval)(code);
+    if (value === undefined) return { ok: true, value: null, type: "undefined" };
+    if (typeof value === "object" && value !== null) {
+      return { ok: true, value: JSON.parse(JSON.stringify(value)), type: "json" };
+    }
+    return { ok: true, value: String(value), type: typeof value };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+// Scroll the page; returns the new scroll position.
+function scrollFunc(dx, dy, behavior) {
+  window.scrollBy({ top: dy, left: dx, behavior: behavior || "auto" });
+  return { x: Math.round(window.scrollX), y: Math.round(window.scrollY) };
+}
+// Element inspector: rect, tag, text, attributes, computed role — for
+// coordinate-based agents that need to know what is under a point.
+function inspectFunc(x, y) {
+  const el = document.elementFromPoint(x, y);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  const attrs = {};
+  for (const a of el.attributes || []) attrs[a.name] = a.value.slice(0, 120);
+  return {
+    tag: el.tagName.toLowerCase(),
+    text: (el.innerText || el.value || el.getAttribute("aria-label") || "").trim().slice(0, 120),
+    x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height),
+    role: el.getAttribute("role") || "",
+    attrs,
+  };
+}
 
 // ── WebSocket management ────────────────────────────────────────────────────
 
-function connect() {
+// Ask the harness to start the local relay if it isn't running. The extension
+// cannot spawn processes, so it calls the harness's /api/_relay/start hook.
+async function ensureRelay() {
+  if (settings.autoStartRelay === false) return true;
+  try {
+    const res = await fetch(`${settings.harnessUrl}/api/_relay/start`, { method: "POST", cache: "no-store" });
+    if (!res.ok) return false;
+    const body = await res.json().catch(() => null);
+    return !!(body && body.ok);
+  } catch {
+    return false; // harness unreachable — just try the WS anyway
+  }
+}
+
+async function connect() {
   if (retry) { clearTimeout(retry); retry = null; }
+  setState("connecting");
+  // If nothing is listening, ask the harness to start the relay first.
+  if (!(await wsReachable())) {
+    await ensureRelay();
+  }
+  openSocket();
+}
+
+function wsReachable() {
+  return new Promise((resolve) => {
+    try {
+      const probe = new WebSocket(settings.relayUrl);
+      const done = (ok) => { try { probe.close(); } catch {} resolve(ok); };
+      probe.onopen = () => done(true);
+      probe.onerror = () => done(false);
+      setTimeout(() => done(false), 1500);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+function openSocket() {
   try {
     ws = new WebSocket(settings.relayUrl);
   } catch { scheduleRetry(); return; }
@@ -283,15 +389,35 @@ function disconnect() {
 function shouldBringForward(action) {
   if (!settings.focusOnAction) return false;
   // Pure metadata actions never need focus.
-  return !["ping", "tabs", "harnessTab", "newHarnessTab", "reload", "status"].includes(action);
+  return !METADATA_ACTIONS.has(action);
 }
+
+// Actions that never touch a tab: they must not create or steal one.
+const METADATA_ACTIONS = new Set([
+  "ping", "status", "tabs", "windows", "groups", "activeTab",
+  "harnessTab", "newHarnessTab", "reload",
+]);
+
+// Actions that still target a tab but must never bring it forward even when
+// focusOnAction is on (they are read-only or background-ish).
+const NON_FOCUS_ACTIONS = new Set([
+  "snap", "page", "eval", "scroll", "inspect", "dialog", "form", "tail",
+  "findText", "shot", "screenshot", "reloadTab",
+]);
 
 async function dispatchAction(msg, reply) {
   const action = msg.action;
+
+  // Metadata actions run without resolving a tab at all.
+  if (METADATA_ACTIONS.has(action)) {
+    const value = await runMetadataAction(action, msg);
+    return value;
+  }
+
   const tab = await targetTab(msg.tabId);
   await ensureGrouped(tab);
 
-  if (shouldBringForward(action)) {
+  if (shouldBringForward(action) && !NON_FOCUS_ACTIONS.has(action)) {
     await bringForward(tab).catch(() => {});
   }
 
@@ -313,6 +439,10 @@ async function dispatchAction(msg, reply) {
     case "reload": { setTimeout(() => chrome.runtime.reload(), 400); return "reloading"; }
     case "status": return currentState();
     case "snap": return await run(snapFunc, []);
+    case "page": return await run(pageFunc, []);
+    case "eval": return await run(evalFunc, [String(msg.code ?? "")]);
+    case "scroll": return await run(scrollFunc, [Number(msg.dx || 0), Number(msg.dy || 0), String(msg.behavior || "auto")]);
+    case "inspect": return await run(inspectFunc, [Number(msg.x), Number(msg.y)]);
     case "dialog": return await run(dialogFunc, []);
     case "form": return await run(formFunc, []);
     case "click": return await run(actFunc, ["click", String(msg.sel || "")]);
@@ -329,40 +459,84 @@ async function dispatchAction(msg, reply) {
     case "screenshot":
       return await takeScreenshot(tab, msg);
     case "navigate": { await chrome.tabs.update(tab.id, { url: msg.url }); return "navigated"; }
+    case "reloadTab": { await chrome.tabs.reload(tab.id); return "reloading tab"; }
+    case "tabInfo": {
+      const t = await chrome.tabs.get(msg.tabId != null ? msg.tabId : tab.id);
+      return { id: t.id, url: t.url || "", title: t.title || "", groupId: t.groupId, windowId: t.windowId, active: t.active, pinned: t.pinned, index: t.index };
+    }
+    case "closeTab": { await chrome.tabs.remove(tab.id); return "closed"; }
+    case "duplicate": {
+      const dup = await chrome.tabs.duplicate(tab.id);
+      return { tabId: dup.id, url: dup.url || "" };
+    }
+    case "pin": { await chrome.tabs.update(tab.id, { pinned: true }); return "pinned"; }
+    case "unpin": { await chrome.tabs.update(tab.id, { pinned: false }); return "unpinned"; }
+    default:
+      return reply({ ok: false, error: "unknown action" }) ?? undefined;
+  }
+}
+
+// Metadata actions: run without touching any tab (never steal or create one).
+async function runMetadataAction(action, msg) {
+  switch (action) {
+    case "ping": return "v7";
+    case "status": return currentState();
     case "tabs": {
       const tabs = await chrome.tabs.query({});
-      return tabs.map((t) => ({ id: t.id, url: t.url || "", title: t.title || "", groupId: t.groupId, windowId: t.windowId, active: t.active }));
+      const windows = await chrome.windows.getAll({ populate: false }).catch(() => []);
+      const winById = new Map(windows.map((w) => [w.id, w]));
+      const groups = await chrome.tabGroups.query({}).catch(() => []);
+      const groupById = new Map(groups.map((g) => [g.id, g]));
+      return tabs.map((t) => ({
+        id: t.id,
+        url: t.url || "",
+        title: t.title || "",
+        groupId: t.groupId,
+        groupTitle: t.groupId !== -1 ? (groupById.get(t.groupId)?.title ?? "") : "",
+        windowId: t.windowId,
+        windowFocused: winById.get(t.windowId)?.focused ?? false,
+        index: t.index,
+        active: t.active,
+        pinned: t.pinned,
+        muted: t.mutedInfo?.muted ?? false,
+        audible: t.audible ?? false,
+        discarded: t.discarded ?? false,
+        status: t.status ?? "",
+      }));
+    }
+    case "windows": {
+      const windows = await chrome.windows.getAll({ populate: false });
+      return windows.map((w) => ({
+        id: w.id, focused: w.focused, type: w.type, state: w.state,
+        width: w.width, height: w.height, tabs: w.tabs ? w.tabs.length : undefined,
+      }));
+    }
+    case "groups": {
+      const groups = await chrome.tabGroups.query({}).catch(() => []);
+      return groups.map((g) => ({
+        id: g.id, title: g.title, color: g.color, windowId: g.windowId, collapsed: g.collapsed,
+      }));
+    }
+    case "activeTab": {
+      const [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      return t ? { tabId: t.id, windowId: t.windowId, url: t.url || "", title: t.title || "" } : null;
     }
     case "harnessTab": {
-      const groups = await chrome.tabGroups.query({ title: "Harness" }).catch(() => []);
-      let found = null;
-      for (const g of groups) {
-        const tabs = await chrome.tabs.query({ groupId: g.id });
-        if (!tabs || !tabs.length) continue;
-        const candidate = tabs.find((t) => !(t.url || "").includes("127.0.0.1:3080"));
-        if (candidate) { found = candidate; break; }
-      }
+      const found = await findHarnessTab();
       return found
         ? { tabId: found.id, windowId: found.windowId, url: found.url || "", title: found.title || "" }
         : null;
     }
     case "newHarnessTab": {
-      const tab = await chrome.tabs.create({ url: msg.url || "about:blank", active: false });
-      const groups = await chrome.tabGroups.query({ title: "Harness" }).catch(() => []);
-      let groupId = -1;
-      if (groups && groups.length) {
-        try { groupId = await chrome.tabs.group({ tabIds: [tab.id], groupId: groups[0].id }); } catch { groupId = -1; }
-      }
-      if (groupId === -1) {
-        try {
-          groupId = await chrome.tabs.group({ tabIds: [tab.id] });
-          await chrome.tabGroups.update(groupId, { title: "Harness", color: "red" }).catch(() => {});
-        } catch {}
-      }
-      return { tabId: tab.id, groupId, url: tab.url || "" };
+      const created = await createHarnessTab(msg?.url);
+      return { tabId: created.id, groupId: created.groupId ?? -1, url: created.url || "" };
+    }
+    case "reload": {
+      setTimeout(() => chrome.runtime.reload(), 400);
+      return "reloading";
     }
     default:
-      return reply({ ok: false, error: "unknown action" }) ?? undefined;
+      return undefined;
   }
 }
 
@@ -448,13 +622,53 @@ function blobToDataUrl(blob) {
 
 // ── Tab helpers ─────────────────────────────────────────────────────────────
 
+// Resolve which tab a command drives.
+//   - Explicit tabId → that tab.
+//   - No tabId → an existing Harness-grouped tab (any window), or a freshly
+//     created background one. NEVER the user's active tab: the harness must
+//     not hijack what the user is looking at.
 function targetTab(tabId) {
   if (tabId != null) return chrome.tabs.get(tabId);
-  return chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((t) => t[0]);
+  return findHarnessTab().then((found) => {
+    if (found) return found;
+    return createHarnessTab();
+  });
 }
 
-// Mark the tab the harness is driving so it is obvious on screen: a red
-// "Harness" tab group. Creates the group on first use.
+// Find a tab already in a "Harness"-named group, in ANY Chrome window. Never
+// the harness GUI tab itself (127.0.0.1:3080) — navigating that away kills
+// the working surface.
+async function findHarnessTab() {
+  const groups = await chrome.tabGroups.query({ title: "Harness" }).catch(() => []);
+  for (const g of groups) {
+    const tabs = await chrome.tabs.query({ groupId: g.id });
+    if (!tabs || !tabs.length) continue;
+    const candidate = tabs.find((t) => !(t.url || "").includes("127.0.0.1:3080"));
+    if (candidate) return candidate;
+  }
+  return null;
+}
+
+// Create a background Harness-grouped tab (never steals focus).
+async function createHarnessTab(url) {
+  const tab = await chrome.tabs.create({ url: url || "about:blank", active: false });
+  const groups = await chrome.tabGroups.query({ title: "Harness" }).catch(() => []);
+  let groupId = -1;
+  if (groups && groups.length) {
+    try { groupId = await chrome.tabs.group({ tabIds: [tab.id], groupId: groups[0].id }); } catch { groupId = -1; }
+  }
+  if (groupId === -1) {
+    try {
+      groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+      await chrome.tabGroups.update(groupId, { title: "Harness", color: "red" }).catch(() => {});
+    } catch {}
+  }
+  return tab;
+}
+
+// Mark a tab Pilot is driving so it is obvious on screen: a red "Harness"
+// tab group. Only groups tabs Pilot owns (created here); never the user's
+// active tab, because targetTab never returns that.
 async function ensureGrouped(tab) {
   if (tab.groupId !== -1) return tab.groupId;
   try {
@@ -492,6 +706,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     try { if (ws) ws.close(); } catch {}
     connect();
     sendResponse({ state: "connecting", ...currentState() });
+  } else if (msg && msg.type === "start-relay") {
+    // Popup's explicit "Start relay" button: call the harness hook, then
+    // connect if the relay comes up.
+    ensureRelay().then((ok) => {
+      if (ok) {
+        intent = true;
+        try { if (ws) ws.close(); } catch {}
+        openSocket();
+        sendResponse({ state: "connecting", ...currentState() });
+      } else {
+        sendResponse({ state: "disconnected", relayError: "relay did not start", ...currentState() });
+      }
+    });
+    return true; // async
   } else if (msg && msg.type === "disconnect") {
     disconnect();
     sendResponse(currentState());

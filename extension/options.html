@@ -55,6 +55,20 @@
     <p class="desc">Where the local Pilot relay listens. Leave default unless you run the relay on another port.</p>
   </div>
 
+  <div class="field">
+    <label for="harnessUrl">Harness URL</label>
+    <input type="text" id="harnessUrl" placeholder="http://127.0.0.1:3080">
+    <p class="desc">Used to ask the harness to start the relay when Connect finds nothing listening.</p>
+  </div>
+
+  <div class="field check">
+    <input type="checkbox" id="autoStartRelay">
+    <div>
+      <label style="margin:0">Auto-start the relay on Connect</label>
+      <p class="desc">When Connect finds no relay, Pilot asks the harness to start it first. Turn off to always connect manually.</p>
+    </div>
+  </div>
+
   <div class="field check">
     <input type="checkbox" id="focusOnAction">
     <div>
