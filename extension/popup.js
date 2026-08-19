@@ -6,7 +6,9 @@ const disconnectBtn = document.getElementById("disconnect");
 const settingsBtn = document.getElementById("settings");
 const hint = document.getElementById("hint");
 const profileEl = document.getElementById("profile");
+const groupNameEl = document.getElementById("groupName");
 const relayEl = document.getElementById("relay");
+const groupBadge = document.getElementById("groupBadge");
 
 function render(state) {
   if (typeof state === "string") state = { connected: state === "connected", intent: state === "connecting" };
@@ -18,11 +20,14 @@ function render(state) {
       ? "Connecting…"
       : "Disconnected";
   connectBtn.hidden = state.connected || state.intent;
-  // The relay may be down: offer to start it (Connect already auto-starts it).
   startRelayBtn.hidden = state.connected || state.intent;
   disconnectBtn.hidden = !state.connected;
   hint.hidden = state.connected || state.intent;
   if (state.profile) profileEl.textContent = state.profile;
+  if (state.groupName) {
+    groupNameEl.textContent = state.groupName;
+    groupBadge.textContent = state.groupName;
+  }
   if (state.relay) relayEl.textContent = state.relay;
 }
 

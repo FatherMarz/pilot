@@ -21,6 +21,8 @@ const DEFAULT_SETTINGS = {
   profileName: "default",
   focusOnAction: false,
   autoStartRelay: true,
+  groupName: "Harness",
+  groupColor: "red",
   shotMaxWidth: 1280,
   shotFormat: "jpeg", // "jpeg" | "png"
   shotQuality: 0.82,
@@ -51,6 +53,8 @@ function currentState() {
     intent,
     profile: settings.profileName,
     relay: settings.relayUrl,
+    groupName: settings.groupName || "Harness",
+    groupColor: settings.groupColor || "red",
   };
 }
 
@@ -635,11 +639,12 @@ function targetTab(tabId) {
   });
 }
 
-// Find a tab already in a "Harness"-named group, in ANY Chrome window. Never
-// the harness GUI tab itself (127.0.0.1:3080) — navigating that away kills
-// the working surface.
+// Find a tab already in a group with the configured name, in ANY Chrome
+// window. Never the harness GUI tab itself (127.0.0.1:3080) — navigating
+// that away kills the working surface.
 async function findHarnessTab() {
-  const groups = await chrome.tabGroups.query({ title: "Harness" }).catch(() => []);
+  const name = settings.groupName || "Harness";
+  const groups = await chrome.tabGroups.query({ title: name }).catch(() => []);
   for (const g of groups) {
     const tabs = await chrome.tabs.query({ groupId: g.id });
     if (!tabs || !tabs.length) continue;
@@ -649,10 +654,13 @@ async function findHarnessTab() {
   return null;
 }
 
-// Create a background Harness-grouped tab (never steals focus).
+// Create a background grouped tab (never steals focus). Uses the configured
+// group name and color, creating the group on first use.
 async function createHarnessTab(url) {
+  const name = settings.groupName || "Harness";
+  const color = settings.groupColor || "red";
   const tab = await chrome.tabs.create({ url: url || "about:blank", active: false });
-  const groups = await chrome.tabGroups.query({ title: "Harness" }).catch(() => []);
+  const groups = await chrome.tabGroups.query({ title: name }).catch(() => []);
   let groupId = -1;
   if (groups && groups.length) {
     try { groupId = await chrome.tabs.group({ tabIds: [tab.id], groupId: groups[0].id }); } catch { groupId = -1; }
@@ -660,20 +668,22 @@ async function createHarnessTab(url) {
   if (groupId === -1) {
     try {
       groupId = await chrome.tabs.group({ tabIds: [tab.id] });
-      await chrome.tabGroups.update(groupId, { title: "Harness", color: "red" }).catch(() => {});
+      await chrome.tabGroups.update(groupId, { title: name, color }).catch(() => {});
     } catch {}
   }
   return tab;
 }
 
-// Mark a tab Pilot is driving so it is obvious on screen: a red "Harness"
-// tab group. Only groups tabs Pilot owns (created here); never the user's
-// active tab, because targetTab never returns that.
+// Mark a tab Pilot is driving so it is obvious on screen: a colored group
+// with the configured name. Only groups tabs Pilot owns (created here);
+// never the user's active tab, because targetTab never returns that.
 async function ensureGrouped(tab) {
   if (tab.groupId !== -1) return tab.groupId;
+  const name = settings.groupName || "Harness";
+  const color = settings.groupColor || "red";
   try {
     const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
-    await chrome.tabGroups.update(groupId, { title: "Harness", color: "red" }).catch(() => {});
+    await chrome.tabGroups.update(groupId, { title: name, color }).catch(() => {});
     return groupId;
   } catch (e) {
     return -1;
