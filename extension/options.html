@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: -apple-system, "Segoe UI", sans-serif;
+      max-width: 520px;
+      margin: 40px auto;
+      padding: 0 20px;
+      background: #fafaf7;
+      color: #0f1419;
+    }
+    @media (prefers-color-scheme: dark) {
+      body { background: #1a1c18; color: #e8e6dd; }
+    }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    .sub { font-size: 12px; color: #8891a0; margin: 0 0 24px; }
+    .field { margin-bottom: 18px; }
+    label { display: block; font-size: 12.5px; font-weight: 600; margin-bottom: 6px; }
+    .desc { font-size: 11px; color: #8891a0; margin: 4px 0 0; line-height: 1.45; }
+    input[type=text], select {
+      width: 100%; box-sizing: border-box;
+      padding: 8px 10px; border: 1px solid rgba(15,20,25,.18); border-radius: 6px;
+      font-size: 13px; background: #fff; color: inherit;
+    }
+    @media (prefers-color-scheme: dark) {
+      input[type=text], select { background: #23251f; border-color: rgba(255,255,255,.14); }
+    }
+    .check { display: flex; align-items: flex-start; gap: 8px; }
+    .check input { margin-top: 2px; }
+    button {
+      margin-top: 8px; padding: 10px 22px; border: 0; border-radius: 6px;
+      background: #00a3a3; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    button:hover { background: #008787; }
+    #saved { color: #2ecc71; font-size: 12px; margin-left: 10px; visibility: hidden; }
+    #saved.show { visibility: visible; }
+  </style>
+</head>
+<body>
+  <h1>Pilot settings</h1>
+  <p class="sub">These apply to this Chrome profile only. Changes take effect immediately.</p>
+
+  <div class="field">
+    <label for="profileName">Profile name</label>
+    <input type="text" id="profileName" placeholder="default">
+    <p class="desc">How this Chrome profile appears on the relay. Give different Chrome profiles different names so the harness can target each one. One relay serves every profile on this machine.</p>
+  </div>
+
+  <div class="field">
+    <label for="relayUrl">Relay URL</label>
+    <input type="text" id="relayUrl" placeholder="ws://127.0.0.1:8756">
+    <p class="desc">Where the local Pilot relay listens. Leave default unless you run the relay on another port.</p>
+  </div>
+
+  <div class="field check">
+    <input type="checkbox" id="focusOnAction">
+    <div>
+      <label style="margin:0">Bring the driven tab forward on every action</label>
+      <p class="desc">Off by default: Pilot drives background tabs without stealing your window. Turn this on only if you want to watch every click happen live.</p>
+    </div>
+  </div>
+
+  <div class="field">
+    <label for="screenshotMode">Screenshot method</label>
+    <select id="screenshotMode">
+      <option value="auto">Auto — visible tab directly, background tabs via CDP</option>
+      <option value="cdp">CDP for everything (works on any tab)</option>
+      <option value="visible">Visible tab only</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="shotMaxWidth">Screenshot max width (px)</label>
+    <input type="text" id="shotMaxWidth" placeholder="1280">
+    <p class="desc">Screenshots are downscaled to this width so the harness can read them quickly. 0 keeps full size.</p>
+  </div>
+
+  <div class="field">
+    <label for="shotFormat">Screenshot format</label>
+    <select id="shotFormat">
+      <option value="jpeg">JPEG (smaller)</option>
+      <option value="png">PNG (lossless)</option>
+    </select>
+  </div>
+
+  <button id="save">Save</button><span id="saved">Saved</span>
+
+  <script src="options.js"></script>
+</body>
+</html>

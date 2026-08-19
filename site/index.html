@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="sand">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pilot — browser control for agent harnesses</title>
+<meta name="description" content="Pilot is a local bridge so any agent harness can drive a Chrome profile — clicks, keys, typing, and small screenshots — without stealing your window.">
+<link rel="icon" type="image/png" href="/icon128.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Narrow:wght@600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root, [data-theme="sand"] {
+    --bg: 217 209 193;
+    --surface: 232 226 213;
+    --surface-alt: 46 50 53;
+    --text: 42 40 34;
+    --text-muted: 107 100 88;
+    --border: 46 50 53;
+    --accent: 226 122 60;
+    --accent-fg: 255 255 255;
+    --font-display: "Archivo Narrow", system-ui, sans-serif;
+    --font-body: "JetBrains Mono", ui-monospace, monospace;
+    --tile-shadow: 3px 3px 0 0 rgb(var(--border));
+    --tile-shadow-hover: 5px 5px 0 0 rgb(var(--border));
+  }
+  [data-theme="tundra"] {
+    --bg: 36 39 33;
+    --surface: 52 56 47;
+    --surface-alt: 122 128 87;
+    --text: 232 229 217;
+    --text-muted: 160 158 143;
+    --border: 94 99 83;
+    --accent: 214 156 74;
+    --accent-fg: 26 28 23;
+    --font-display: "JetBrains Mono", ui-monospace, monospace;
+    --font-body: "JetBrains Mono", ui-monospace, monospace;
+    --tile-shadow: none;
+    --tile-shadow-hover: none;
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: light; }
+  html[data-theme="tundra"] { color-scheme: dark; }
+  body {
+    margin: 0;
+    background: rgb(var(--bg));
+    color: rgb(var(--text));
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 32px 20px 80px; }
+  .top { display: flex; align-items: center; justify-content: space-between; padding-bottom: 28px; }
+  .brand { font-size: 10px; letter-spacing: 0.3em; text-transform: uppercase; color: rgb(var(--text-muted)); }
+  .theme-btn {
+    font-family: inherit; font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase;
+    padding: 6px 10px; border: 2px solid rgb(var(--border)); background: rgb(var(--surface));
+    color: rgb(var(--text)); cursor: pointer; box-shadow: var(--tile-shadow);
+  }
+  .theme-btn:active { transform: translate(2px, 2px); box-shadow: none; }
+  .hero { display: flex; gap: 22px; align-items: flex-start; margin-bottom: 10px; }
+  .hero img { width: 84px; height: 84px; border: 2px solid rgb(var(--border)); box-shadow: var(--tile-shadow); flex: 0 0 auto; }
+  h1 { font-family: var(--font-display); font-weight: 700; font-size: clamp(28px, 5vw, 42px); line-height: 1.02; text-transform: uppercase; margin: 0 0 10px; letter-spacing: 0.01em; }
+  .lede { font-size: 14px; line-height: 1.6; color: rgb(var(--text-muted)); margin: 0 0 26px; max-width: 60ch; }
+  .lede strong { color: rgb(var(--text)); }
+  .tile {
+    background: rgb(var(--surface));
+    border: 2px solid rgb(var(--border));
+    box-shadow: var(--tile-shadow);
+    padding: 18px 18px 16px;
+    margin-bottom: 22px;
+  }
+  h2 { font-family: var(--font-display); font-weight: 700; font-size: 15px; text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 12px; }
+  h2 .n { color: rgb(var(--accent)); margin-right: 8px; }
+  p, li { font-size: 13px; line-height: 1.65; }
+  ul { margin: 0 0 14px; padding-left: 18px; }
+  li { margin-bottom: 6px; }
+  code, pre {
+    font-family: var(--font-body);
+    background: rgb(var(--surface-alt));
+    color: rgb(var(--surface));
+    font-size: 12px;
+  }
+  [data-theme="tundra"] code, [data-theme="tundra"] pre { color: rgb(var(--text)); }
+  code { padding: 1px 5px; }
+  pre {
+    padding: 14px; overflow-x: auto; line-height: 1.6; margin: 10px 0 14px;
+    border: 2px solid rgb(var(--border));
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+  pre .c { color: rgb(var(--text-muted)); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  @media (max-width: 620px) { .grid2 { grid-template-columns: 1fr; } .hero img { display: none; } }
+  .btn {
+    display: inline-block; font-family: var(--font-body); font-size: 12px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase; text-decoration: none;
+    padding: 10px 16px; border: 2px solid rgb(var(--border));
+    background: rgb(var(--accent)); color: rgb(var(--accent-fg));
+    box-shadow: var(--tile-shadow); margin-right: 10px; margin-bottom: 10px;
+  }
+  .btn.ghost { background: rgb(var(--surface)); color: rgb(var(--text)); }
+  .btn:active { transform: translate(2px, 2px); box-shadow: none; }
+  .status { font-size: 11px; color: rgb(var(--text-muted)); margin-top: 16px; }
+  .status b { color: rgb(var(--accent)); }
+  footer { margin-top: 40px; font-size: 11px; color: rgb(var(--text-muted)); letter-spacing: 0.05em; }
+  .cmd-table td { padding: 3px 0; font-size: 12.5px; vertical-align: top; }
+  .cmd-table td:first-child { color: rgb(var(--accent)); padding-right: 14px; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <span class="brand">Pilot</span>
+    <button class="theme-btn" id="themeBtn" aria-label="Toggle theme">Tundra</button>
+  </div>
+
+  <div class="hero">
+    <img src="/icon128.png" alt="Pilot icon">
+    <div>
+      <h1>Pilot</h1>
+      <p class="lede">A local bridge so any agent harness can <strong>drive your Chrome</strong> — clicks, keys, typing, tabs, and small screenshots — <strong>without stealing your window</strong>. You stay in control: clicking <strong>Connect</strong> in the popup is the handshake, every time.</p>
+      <a class="btn" href="https://github.com/FatherMarz/pilot">Get Pilot</a>
+      <a class="btn ghost" href="https://github.com/FatherMarz/pilot#readme">Read the docs</a>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="tile">
+      <h2><span class="n">01</span>You are the password</h2>
+      <p>The relay is localhost-only. A Chrome profile appears on it only after you click <strong>Connect</strong> in the Pilot popup — and disappears when you click <strong>Disconnect</strong> or close Chrome. No auto-reconnect, no background bots.</p>
+      <p>Use different Chrome profiles for different jobs. Give each one a name, and the harness targets the right one:</p>
+      <pre><code><span class="c"># work profile, personal profile — same machine, same relay</span>
+node cli.js '{"action":"click","text":"Deploy"}' --profile work
+node cli.js '{"action":"shot"}' --profile personal</code></pre>
+    </div>
+
+    <div class="tile">
+      <h2><span class="n">02</span>Works in the background</h2>
+      <p>Commands run via <code>chrome.scripting.executeScript</code>, which works on inactive tabs. The harness clicks, types, and snapshots a background tab while you keep working. Driven tabs get a red <strong>Harness</strong> group so you can always see what the agent is touching.</p>
+      <p>Background-tab screenshots use the Chrome DevTools Protocol — no tab activation needed. Screenshots are downscaled small so the harness can read them fast.</p>
+    </div>
+  </div>
+
+  <div class="tile">
+    <h2><span class="n">03</span>Reads screenshots without a vision key</h2>
+    <p>Pilot ships with an on-device OCR tool built on macOS Vision. Screenshot → disk → read, with zero API keys:</p>
+    <pre><code>node cli.js '{"action":"shot"}' --out /tmp/page.jpg
+./ocr /tmp/page.jpg          <span class="c"># plain text</span>
+./ocr /tmp/page.jpg --json   <span class="c"># boxes + confidence</span></code></pre>
+  </div>
+
+  <div class="tile">
+    <h2><span class="n">04</span>CLI cheat sheet</h2>
+    <table class="cmd-table">
+      <tr><td>node cli.js --status</td><td>who is connected</td></tr>
+      <tr><td>{"action":"snap"}</td><td>page snapshot — title, url, text, clickable items</td></tr>
+      <tr><td>{"action":"click","sel":"button.x"}</td><td>click by CSS selector</td></tr>
+      <tr><td>{"action":"clickText","text":"Save"}</td><td>click by visible text</td></tr>
+      <tr><td>{"action":"clickXY","x":100,"y":200}</td><td>click at coordinates</td></tr>
+      <tr><td>{"action":"type","text":"hi"}</td><td>type into the focused composer</td></tr>
+      <tr><td>{"action":"key","key":"Enter"}</td><td>press a key</td></tr>
+      <tr><td>{"action":"fill","sel":"#name","value":"Ada"}</td><td>set an input</td></tr>
+      <tr><td>{"action":"form"} / {"action":"dialog"}</td><td>inspect the open form / dialog</td></tr>
+      <tr><td>{"action":"tabs"} / {"action":"navigate","url":"…"}</td><td>tabs and navigation</td></tr>
+      <tr><td>{"action":"shot"}</td><td>small screenshot → saved to ~/.pilot/shots/</td></tr>
+    </table>
+    <p class="status">Relay status: <b id="live">unknown</b></p>
+  </div>
+
+  <div class="tile">
+    <h2><span class="n">05</span>Run it</h2>
+    <pre><code><span class="c"># 1. relay</span>
+node server.js
+
+<span class="c"># 2. load the extension</span>
+chrome://extensions  →  Developer mode  →  Load unpacked  →  extension/
+
+<span class="c"># 3. click Connect in the Pilot popup — that's the handshake</span>
+<span class="c"># 4. drive it</span>
+node cli.js '{"action":"snap"}'</code></pre>
+  </div>
+
+  <footer>
+    <span>Pilot · local · open source · made for modul4r</span>
+  </footer>
+</div>
+
+<script>
+  const html = document.documentElement;
+  const btn = document.getElementById("themeBtn");
+  const saved = localStorage.getItem("pilot-theme");
+  const apply = (t) => { html.dataset.theme = t; btn.textContent = t === "tundra" ? "Sand" : "Tundra"; };
+  apply(saved || "sand");
+  btn.addEventListener("click", () => {
+    const next = html.dataset.theme === "sand" ? "tundra" : "sand";
+    localStorage.setItem("pilot-theme", next);
+    apply(next);
+  });
+
+  // Live relay status — only meaningful on the machine running the relay.
+  const live = document.getElementById("live");
+  fetch("http://127.0.0.1:8756/", { cache: "no-store" })
+    .then((r) => r.json())
+    .then((s) => {
+      const names = s.profiles.map((p) => p.name).join(", ") || "none";
+      live.textContent = s.profiles.length ? "connected: " + names : "no profiles connected — click Connect in a Pilot popup";
+    })
+    .catch(() => { live.textContent = "relay not running on this machine (this page is public; run node server.js locally)"; });
+</script>
+</body>
+</html>

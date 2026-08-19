@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Pilot",
+  "version": "0.2.0",
+  "description": "Local bridge so any agent harness can drive this Chrome profile. Click Connect to handshake. Works on background tabs without stealing focus.",
+  "permissions": ["scripting", "tabs", "activeTab", "alarms", "storage", "tabGroups", "debugger"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Pilot",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "pilot",
+  "version": "0.2.0",
+  "description": "Local bridge so any agent harness can drive a Chrome profile. Relay + MV3 extension + CLI.",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "build:ocr": "swiftc -O ocr.swift -o ocr"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}
