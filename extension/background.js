@@ -32,7 +32,9 @@ const DEFAULT_SETTINGS = {
 let settings = { ...DEFAULT_SETTINGS };
 let ws = null;
 let retry = null;
-let intent = false; // user asked to connect (not persisted across worker restarts)
+let intent = false; // user asked to connect — persisted in session storage so
+                    // a worker restart (or the reload action) reconnects
+const INTENT_KEY = "pilotConnectIntent";
 
 function loadSettings() {
   return new Promise((resolve) => {
@@ -40,6 +42,28 @@ function loadSettings() {
       settings = { ...DEFAULT_SETTINGS, ...got };
       resolve(settings);
     });
+  });
+}
+
+// Persist the connect intent in session storage: survives service-worker
+// restarts and extension reloads (chrome.runtime.reload), but Chrome fully
+// closing clears it, so the handshake stays a per-browser-session action.
+function saveIntent(value) {
+  intent = value;
+  try {
+    chrome.storage.session.set({ [INTENT_KEY]: value }).catch(() => {});
+  } catch {}
+}
+
+function loadIntent() {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.session.get(INTENT_KEY, (got) => {
+        resolve(!!got?.[INTENT_KEY]);
+      });
+    } catch {
+      resolve(false);
+    }
   });
 }
 
@@ -386,7 +410,7 @@ function scheduleRetry() {
 }
 
 function disconnect() {
-  intent = false;
+  saveIntent(false);
   if (retry) { clearTimeout(retry); retry = null; }
   try { if (ws) ws.close(); } catch {}
   ws = null;
@@ -751,7 +775,7 @@ try {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "connect") {
-    intent = true;
+    saveIntent(true);
     try { if (ws) ws.close(); } catch {}
     connect();
     sendResponse({ state: "connecting", ...currentState() });
@@ -774,6 +798,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
-// The worker starts with intent=false: no connect() call here. The popup's
-// Connect button is the handshake.
-loadSettings();
+// Startup: load settings, then reconnect if the user had connected before
+// this worker's life — session storage survives reloads and worker restarts
+// (only a full Chrome quit clears it, so the handshake stays per session).
+loadSettings().then(async () => {
+  const wasConnected = await loadIntent();
+  if (wasConnected) {
+    intent = true;
+    connect();
+  }
+});
