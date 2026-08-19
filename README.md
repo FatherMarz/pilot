@@ -134,7 +134,10 @@ default) — small enough for the harness to read fast. The CLI writes it to
 Pilot options page (right-click the icon → Options):
 
 - **Profile name** — how this Chrome profile appears on the relay
-- **Relay URL** — where the relay listens
+- **Relay URL** / **Harness URL** — where the relay and harness listen
+- **Auto-start the relay on Connect** — on by default
+- **Driven-tab group name and color** — the group Pilot puts driven tabs in
+  (default `Harness` / red); the agent targets tabs in this group
 - **Bring the driven tab forward on every action** — off by default (background mode)
 - **Screenshot method** — auto / CDP always / visible tab only
 - **Screenshot max width** and **format**
