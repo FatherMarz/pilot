@@ -721,17 +721,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     try { if (ws) ws.close(); } catch {}
     connect();
     sendResponse({ state: "connecting", ...currentState() });
-  } else if (msg && msg.type === "start-relay") {
-    // Popup's explicit "Start relay" button: ask the harness to start the
-    // relay, then always try to connect — the relay may already be up even
-    // when the harness hook is missing.
-    ensureRelay().then(() => {
-      intent = true;
-      try { if (ws) ws.close(); } catch {}
-      openSocket();
-      sendResponse({ state: "connecting", ...currentState() });
-    });
-    return true; // async
   } else if (msg && msg.type === "disconnect") {
     disconnect();
     sendResponse(currentState());

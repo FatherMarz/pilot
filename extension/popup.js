@@ -1,7 +1,6 @@
 const label = document.getElementById("label");
 const statusEl = document.getElementById("status");
 const connectBtn = document.getElementById("connect");
-const startRelayBtn = document.getElementById("startRelay");
 const disconnectBtn = document.getElementById("disconnect");
 const settingsBtn = document.getElementById("settings");
 const hint = document.getElementById("hint");
@@ -20,7 +19,6 @@ function render(state) {
       ? "Connecting…"
       : "Disconnected";
   connectBtn.hidden = state.connected || state.intent;
-  startRelayBtn.hidden = state.connected || state.intent;
   disconnectBtn.hidden = !state.connected;
   hint.hidden = state.connected || state.intent;
   if (state.profile) profileEl.textContent = state.profile;
@@ -31,13 +29,15 @@ function render(state) {
   if (state.relay) relayEl.textContent = state.relay;
 }
 
+// One button. Connect auto-starts the relay (via the harness hook) when
+// nothing is listening, then handshakes. The background handles it; we just
+// show "Starting…" while it works.
 connectBtn.addEventListener("click", () => {
-  chrome.runtime.sendMessage({ type: "connect" }, (r) => render(r || {}));
-});
-startRelayBtn.addEventListener("click", () => {
-  startRelayBtn.textContent = "Starting relay…";
-  chrome.runtime.sendMessage({ type: "start-relay" }, (r) => {
-    startRelayBtn.textContent = "Start relay, then connect";
+  connectBtn.classList.add("starting");
+  connectBtn.textContent = "Starting…";
+  chrome.runtime.sendMessage({ type: "connect" }, (r) => {
+    connectBtn.classList.remove("starting");
+    connectBtn.textContent = "Connect";
     render(r || {});
   });
 });

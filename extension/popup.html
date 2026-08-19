@@ -88,9 +88,7 @@
     button:active { transform: translateY(1px); }
     #connect { background: #00a3a3; color: #fff; }
     #connect:hover { background: #008787; }
-    #startRelay { background: #eef0ea; color: #1a1c18; }
-    #startRelay:hover { background: #e3e6dd; }
-    @media (prefers-color-scheme: dark) { #startRelay { background: #2b2d28; color: #e8e6dd; } }
+    #connect.starting { opacity: 0.7; pointer-events: none; }
     #disconnect { background: #fbeae8; color: #b3382c; }
     #disconnect:hover { background: #f7dcd8; }
     @media (prefers-color-scheme: dark) { #disconnect { background: #3a2623; color: #f0a99e; } }
@@ -124,11 +122,10 @@
 
   <div class="actions">
     <button id="connect" hidden>Connect</button>
-    <button id="startRelay" hidden>Start relay, then connect</button>
     <button id="disconnect" hidden>Disconnect</button>
     <button id="settings">Settings</button>
   </div>
-  <p class="hint" id="hint" hidden>Connect is the handshake. If the relay isn't running, Pilot starts it for you.</p>
+  <p class="hint" id="hint" hidden>Connect starts the relay if needed, then handshakes.</p>
 
   <script src="popup.js"></script>
 </body>
