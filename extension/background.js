@@ -32,9 +32,19 @@ const DEFAULT_SETTINGS = {
 let settings = { ...DEFAULT_SETTINGS };
 let ws = null;
 let retry = null;
-let intent = false; // user asked to connect — persisted in session storage so
-                    // a worker restart (or the reload action) reconnects
+let intent = false; // user asked to connect — persisted in local storage so a
+                    // worker restart (or the reload action) reconnects; cleared
+                    // on browser start so the handshake stays per browser session
 const INTENT_KEY = "pilotConnectIntent";
+
+// chrome.storage.session is cleared by chrome.runtime.reload() in current
+// Chrome, which silently killed the bridge after `{"action":"reload"}`. The
+// intent therefore lives in local storage, cleared only on browser start:
+// a reload (which does not fire onStartup) keeps the intent, a full Chrome
+// quit drops it.
+chrome.runtime.onStartup.addListener(() => {
+  try { chrome.storage.local.remove(INTENT_KEY).catch(() => {}); } catch {}
+});
 
 function loadSettings() {
   return new Promise((resolve) => {
@@ -51,14 +61,14 @@ function loadSettings() {
 function saveIntent(value) {
   intent = value;
   try {
-    chrome.storage.session.set({ [INTENT_KEY]: value }).catch(() => {});
+    chrome.storage.local.set({ [INTENT_KEY]: value }).catch(() => {});
   } catch {}
 }
 
 function loadIntent() {
   return new Promise((resolve) => {
     try {
-      chrome.storage.session.get(INTENT_KEY, (got) => {
+      chrome.storage.local.get(INTENT_KEY, (got) => {
         resolve(!!got?.[INTENT_KEY]);
       });
     } catch {
@@ -561,8 +571,11 @@ async function runMetadataAction(action, msg) {
         : null;
     }
     case "newHarnessTab": {
-      const created = await createHarnessTab(msg?.url);
-      return { tabId: created.id, groupId: created.groupId ?? -1, url: created.url || "" };
+      const created = await createHarnessTab(msg?.url, {
+        windowId: msg?.windowId,
+        newWindow: Boolean(msg?.newWindow),
+      });
+      return { tabId: created.id, groupId: created.groupId ?? -1, url: created.url || "", windowId: created.windowId };
     }
     case "reload": {
       setTimeout(() => chrome.runtime.reload(), 400);
@@ -606,17 +619,46 @@ function tabIsActive(tab) {
   return chrome.tabs.query({ active: true, windowId: tab.windowId }).then((t) => t[0] && t[0].id === tab.id);
 }
 
+// Attach to a tab's debugger, recovering from a stale attach left by a
+// previous interrupted command. Chrome allows one debugger per tab; if a
+// screenshot/eval was killed between attach and detach, the tab stays wedged
+// ("Another debugger is already attached") until Chrome restarts. We detach
+// first (ours or a dead peer's), then attach fresh.
+function attachDebugger(tabId) {
+  return new Promise((resolve, reject) => {
+    const tryAttach = () => {
+      chrome.debugger.attach({ tabId }, "1.3", () => {
+        if (!chrome.runtime.lastError) return resolve();
+        // Already attached — recover by detaching (best-effort) and retrying once.
+        chrome.debugger.detach({ tabId }, () => {
+          chrome.debugger.attach({ tabId }, "1.3", () => {
+            if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+            resolve();
+          });
+        });
+      });
+    };
+    tryAttach();
+  });
+}
+
+function detachDebugger(tabId) {
+  return new Promise((resolve) => {
+    chrome.debugger.detach({ tabId }, () => resolve());
+  });
+}
+
 function cdpScreenshot(tabId, format) {
   return new Promise((resolve, reject) => {
-    chrome.debugger.attach({ tabId }, "1.3", () => {
-      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+    attachDebugger(tabId).then(() => {
       chrome.debugger.sendCommand({ tabId }, "Page.captureScreenshot", { format }, (res) => {
-        chrome.debugger.detach({ tabId }, () => {});
-        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        const err = chrome.runtime.lastError;
+        detachDebugger(tabId);
+        if (err) return reject(new Error(err.message));
         if (!res || !res.data) return reject(new Error("no screenshot data"));
         resolve(`data:image/png;base64,${res.data}`);
       });
-    });
+    }).catch(reject);
   });
 }
 
@@ -626,15 +668,15 @@ function cdpScreenshot(tabId, format) {
 // code sees the page's own JS globals, not the isolated world's.
 function evalViaCdp(tabId, code) {
   return new Promise((resolve, reject) => {
-    chrome.debugger.attach({ tabId }, "1.3", () => {
-      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+    attachDebugger(tabId).then(() => {
       chrome.debugger.sendCommand(
         { tabId },
         "Runtime.evaluate",
         { expression: code, returnByValue: true, awaitPromise: true },
         (res) => {
-          chrome.debugger.detach({ tabId }, () => {});
-          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          const err = chrome.runtime.lastError;
+          detachDebugger(tabId);
+          if (err) return reject(new Error(err.message));
           if (!res) return reject(new Error("no eval result"));
           if (res.exceptionDetails) {
             const detail = res.exceptionDetails.exception?.description || res.exceptionDetails.text || "exception";
@@ -650,7 +692,7 @@ function evalViaCdp(tabId, code) {
           return resolve({ ok: true, value: r?.value ?? r?.description ?? null, type: r?.type });
         }
       );
-    });
+    }).catch(reject);
   });
 }
 
@@ -719,21 +761,38 @@ async function findHarnessTab() {
 
 // Create a background grouped tab (never steals focus). Uses the configured
 // group name and color, creating the group on first use.
-async function createHarnessTab(url) {
+//   opts.windowId  → place the tab in that existing window
+//   opts.newWindow → open a brand-new window for this tab
+// Without either it lands in the last-focused window. This lets separate
+// agents own tabs in separate windows of the same profile.
+async function createHarnessTab(url, opts = {}) {
   const name = settings.groupName || "Harness";
   const color = settings.groupColor || "red";
-  const tab = await chrome.tabs.create({ url: url || "about:blank", active: false });
+  const targetUrl = url || "about:blank";
+
+  let tab;
+  if (opts.newWindow) {
+    const win = await chrome.windows.create({ url: targetUrl, focused: false });
+    tab = (win.tabs && win.tabs[0]) || null;
+    if (!tab) throw new Error("new window created no tab");
+  } else {
+    const createOpts = { url: targetUrl, active: false };
+    if (opts.windowId != null) createOpts.windowId = opts.windowId;
+    tab = await chrome.tabs.create(createOpts);
+  }
+
+  // Group under the configured name. A tab group id is scoped to one window,
+  // so reuse an existing group only when it lives in this same window.
   const groups = await chrome.tabGroups.query({ title: name }).catch(() => []);
-  let groupId = -1;
-  if (groups && groups.length) {
-    try { groupId = await chrome.tabs.group({ tabIds: [tab.id], groupId: groups[0].id }); } catch { groupId = -1; }
-  }
-  if (groupId === -1) {
-    try {
-      groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+  const sameWindow = groups.find((g) => g.windowId === tab.windowId);
+  try {
+    if (sameWindow) {
+      await chrome.tabs.group({ tabIds: [tab.id], groupId: sameWindow.id });
+    } else {
+      const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
       await chrome.tabGroups.update(groupId, { title: name, color }).catch(() => {});
-    } catch {}
-  }
+    }
+  } catch {}
   return tab;
 }
 

@@ -25,9 +25,33 @@ All commands go through the CLI. The CLI lives at:
 Add `--profile NAME` when the profile isn't the default. Add `--out FILE` to a `shot`
 to choose where the image lands.
 
+### One tab per agent — always pass `--session`
+
+Every command takes `--session "$DSH_SESSION_ID"`. That is your unique agent id.
+The first command with a new session claims a dedicated background tab and pins
+it on disk; every later command drives that same tab. Your tab is yours — another
+agent with a different session id gets its own tab and can never hijack yours.
+Two agents in the same window get separate tabs; different windows and different
+Chrome profiles also work:
+
+```sh
+node cli.js '{"action":"snap"}' --session "$DSH_SESSION_ID"                  # same window
+node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --new-window    # own window
+node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --window 123    # given window
+node cli.js '{"action":"snap"}' --session "$DSH_SESSION_ID" --profile work   # other profile
+node cli.js '{"action":"release"}' --session "$DSH_SESSION_ID"   # close your tab when done
+node cli.js '{"action":"guard"}' --session "$DSH_SESSION_ID"     # pull the tab back if it drifted
+node cli.js --sessions                                           # see every agent's pin
+```
+
+Never omit `--session`: without it every agent shares the "default" pin and you
+can collide with another driver.
+
 | Goal | Command |
 | --- | --- |
 | What's on the page | `node cli.js '{"action":"snap"}'` — title, url, page text, clickable items with coordinates |
+| Claim your dedicated tab | `node cli.js '{"action":"claim"}'` (auto-claimed on your first command) |
+| Close your tab when done | `node cli.js '{"action":"release"}'` |
 | Click by text | `node cli.js '{"action":"clickText","text":"Save"}'` (add `"exact":true` for exact match) |
 | Click by CSS selector | `node cli.js '{"action":"click","sel":"button.submit"}'` |
 | Click by coordinates | `node cli.js '{"action":"clickXY","x":300,"y":500}'` |

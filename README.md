@@ -64,9 +64,29 @@ they work without focusing the tab.
 
 ```sh
 node cli.js --status                                  # who is connected
+node cli.js --sessions                                # every agent's tab pin (~/.pilot/session.json)
+```
 
-# Tabs & windows — read-only, never touch your active tab
-node cli.js '{"action":"tabs"}'                       # every tab: url, title, group, window, pinned, muted, active
+### Sessions — one tab per agent
+
+Every agent passes `--session NAME` (use your agent id, e.g. `$DSH_SESSION_ID`).
+The first command with a new session claims a dedicated background tab and pins
+it on disk; later commands drive that same tab, so two agents can never hijack
+each other. Same window = separate tabs; `--new-window` / `--window ID` = separate
+windows; `--profile NAME` = separate Chrome profiles.
+
+```sh
+node cli.js '{"action":"claim"}' --session NAME --new-window    # claim, in a new window
+node cli.js '{"action":"release"}' --session NAME               # close the pinned tab, forget it
+node cli.js '{"action":"guard"}' --session NAME                 # pull the tab back if it drifted
+node cli.js '{"action":"snap"}' --session NAME --profile work   # drive it in another profile
+```
+
+Every other command also takes `--session NAME` (default `default` — omit only
+when nothing else shares the profile). `--tab ID` overrides the pin for one call.
+
+```sh
+node cli.js '{"action":"tabs"}'                                  # every tab: url, title, group, window, pinned, muted, active
 node cli.js '{"action":"windows"}'                    # every window: focused, type, state, size
 node cli.js '{"action":"groups"}'                     # every tab group: title, color, window, collapsed
 node cli.js '{"action":"activeTab"}'                  # what YOU are looking at right now (so the agent avoids it)
@@ -105,10 +125,13 @@ node cli.js '{"action":"reload"}'                     # reload the extension
 
 ### Tab targeting rules
 
-- **No `tabId` in a command** → Pilot drives the Harness-grouped background
-  tab (finds an existing one, or creates a fresh background tab). It **never**
-  hijacks your active tab.
-- **`tabId` given** → that exact tab.
+- **Via the CLI with `--session NAME`** (the normal path) → your pinned tab,
+  claimed on first use. Two agents with different session names drive different
+  tabs in the same window and never touch each other's (or yours).
+- **`--tab ID` or an inline `tabId`** → that exact tab, once.
+- **No session, no `tabId`** → Pilot drives a Harness-grouped background tab
+  (finds one or creates a fresh background tab). It **never** hijacks your
+  active tab.
 - Read-only actions (`tabs`, `windows`, `groups`, `activeTab`, `snap`, `page`,
   `eval`, `scroll`, `inspect`, `shot`) never bring a tab forward, even with
   "bring forward" enabled. Only real interactions (`click`, `type`, `key`,
