@@ -11,7 +11,10 @@ const relayEl = document.getElementById("relay");
 function render(state) {
   if (typeof state === "string") state = { connected: state === "connected", intent: state === "connecting" };
   if (!state) state = {};
-  statusEl.className = state.connected ? "connected" : state.intent ? "connecting" : "disconnected";
+  // Keep the status-row layout class; only swap the state modifier. The old
+  // code replaced the whole className, which dropped "status-row" and left the
+  // label as bare text hugging the popup's left edge.
+  statusEl.className = "status-row " + (state.connected ? "connected" : state.intent ? "connecting" : "disconnected");
   label.textContent = state.connected
     ? "Connected to harness"
     : state.intent
