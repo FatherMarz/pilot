@@ -19,6 +19,7 @@ const DEFAULT_SETTINGS = {
   relayUrl: "ws://127.0.0.1:8756",
   profileName: "default",
   focusOnAction: false,
+  visualFeedback: true,
   shotMaxWidth: 1280,
   shotFormat: "jpeg", // "jpeg" | "png"
   shotQuality: 0.82,
@@ -57,8 +58,10 @@ function currentState() {
 // body into the page but NOT the helpers it references, so every helper is
 // inlined. Visual feedback: a soft glow around the tab edge + a cursor arrow
 // at the last interaction point.
-function actFunc(mode, a, b, c) {
+function actFunc(mode, a, b, c, d) {
   const base = "cb-bridge-";
+  // Last arg: whether to draw the glow + cursor. Off for clean recordings.
+  const showFeedback = d !== false;
   const ensureArm = () => {
     let cursor = document.getElementById(base + "cursor");
     if (!cursor) {
@@ -83,13 +86,15 @@ function actFunc(mode, a, b, c) {
     return cursor;
   };
   const pointAt = (el) => {
-    const cursor = ensureArm();
     const r = el.getBoundingClientRect();
     const x = Math.round(r.x + r.width / 2);
     const y = Math.round(r.y + r.height / 2);
-    cursor.style.left = x + "px";
-    cursor.style.top = y + "px";
-    cursor.style.display = "block";
+    if (showFeedback) {
+      const cursor = ensureArm();
+      cursor.style.left = x + "px";
+      cursor.style.top = y + "px";
+      cursor.style.display = "block";
+    }
     return { x, y };
   };
   const fireClick = (el, x, y) => {
@@ -345,17 +350,17 @@ async function dispatchAction(msg, reply) {
     case "snap": return await run(snapFunc, []);
     case "dialog": return await run(dialogFunc, []);
     case "form": return await run(formFunc, []);
-    case "click": return await run(actFunc, ["click", String(msg.sel || "")]);
-    case "clickXY": return await run(actFunc, ["clickXY", Number(msg.x), Number(msg.y)]);
-    case "key": return await run(actFunc, ["key", String(msg.key || ""), Boolean(msg.meta), Boolean(msg.shift)]);
-    case "tail": return await run(actFunc, ["tail"]);
-    case "hrefs": return await run(actFunc, ["hrefs", String(msg.text || "")]);
-    case "clickText": return await run(actFunc, ["clickText", String(msg.text || ""), null, Boolean(msg.exact)]);
+    case "click": return await run(actFunc, ["click", String(msg.sel || ""), null, null, settings.visualFeedback]);
+    case "clickXY": return await run(actFunc, ["clickXY", Number(msg.x), Number(msg.y), null, settings.visualFeedback]);
+    case "key": return await run(actFunc, ["key", String(msg.key || ""), Boolean(msg.meta), Boolean(msg.shift), settings.visualFeedback]);
+    case "tail": return await run(actFunc, ["tail", null, null, null, settings.visualFeedback]);
+    case "hrefs": return await run(actFunc, ["hrefs", String(msg.text || ""), null, null, settings.visualFeedback]);
+    case "clickText": return await run(actFunc, ["clickText", String(msg.text || ""), null, Boolean(msg.exact), settings.visualFeedback]);
     case "findText": return await run(findTextFunc, [String(msg.text || "")]);
     case "fill": return await run(fillFunc, [String(msg.sel || ""), String(msg.value ?? "")]);
     case "fillShadow": return await run(fillShadowFunc, [String(msg.value || "")]);
-    case "type": return await run(actFunc, ["type", String(msg.sel || ""), String(msg.text || "")]);
-    case "replace": return await run(actFunc, ["replace", String(msg.sel || ""), String(msg.text || "")]);
+    case "type": return await run(actFunc, ["type", String(msg.sel || ""), String(msg.text || ""), null, settings.visualFeedback]);
+    case "replace": return await run(actFunc, ["replace", String(msg.sel || ""), String(msg.text || ""), null, settings.visualFeedback]);
     case "shot":
     case "screenshot":
       return await takeScreenshot(tab, msg);

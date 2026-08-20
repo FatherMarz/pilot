@@ -19,6 +19,10 @@ control loop to it: it runs on a browser-capable model. Call `browser_driver` wi
 the task in plain words; it loads this skill itself, drives the CLI, and reports
 back. Fall back to driving the CLI directly only if `browser_driver` is unavailable.
 
+**Read-only first.** For reading a public page, docs, or any static content,
+prefer `web_search`/WebFetch — no browser needed. Use Pilot when the task must
+interact with a live page: fill a form, click, type, or drive a logged-in app.
+
 ## Before you start (the handshake)
 
 1. Relay must be running: `node server.js` (in `~/Documents/Development/custom-tools/pilot`).
@@ -106,6 +110,8 @@ node cli.js '{"action":"shot"}' --out /tmp/page.jpg   # writes the image
 
 This works even when the OpenRouter/vision key is broken. Prefer OCR for reading
 screenshot text; only use a vision model when you need visual layout (colors, images).
+To actually look at a screenshot (layout, colors, images), open the printed path
+with `read_image`; `ocr` covers text with no vision key.
 
 ## Workflow guidance
 
