@@ -67,22 +67,23 @@ node cli.js --status                                  # who is connected
 node cli.js --sessions                                # every agent's tab pin (~/.pilot/session.json)
 ```
 
-### Sessions — one tab per agent
+### Sessions — one tab per agent, own window per profile
 
 Every agent passes `--session NAME` (use your agent id, e.g. `$DSH_SESSION_ID`).
-The first command with a new session claims a dedicated background tab and pins
-it on disk; later commands drive that same tab, so two agents can never hijack
-each other. Same window = separate tabs; `--here` / `--window ID` / `--new-window`
-= separate windows; `--profile NAME` = separate Chrome profiles. A claimed tab
-stays in the window it was claimed in — flipping focus between windows never
-moves it.
+The first command with a new session claims a dedicated tab in its **own new
+window** of the target profile and pins it on disk; later commands drive that
+same tab, so two agents can never hijack each other. The profile is the
+boundary — `--profile NAME` picks the connected Chrome profile, and the agent
+works in a fresh window there. Opt into sharing a window with `--here` (the
+one focused now) or `--window ID`. A claimed tab stays where it was claimed,
+even as focus flips between windows.
 
 ```sh
-node cli.js '{"action":"claim"}' --session NAME --here          # pin to the window that is focused now
-node cli.js '{"action":"claim"}' --session NAME --new-window    # claim, in a new window
-node cli.js '{"action":"release"}' --session NAME               # close the pinned tab, forget it
-node cli.js '{"action":"guard"}' --session NAME                 # pull the tab back if it drifted
-node cli.js '{"action":"snap"}' --session NAME --profile work   # drive it in another profile
+node cli.js '{"action":"claim"}' --session NAME                # own new window, this profile
+node cli.js '{"action":"claim"}' --session NAME --profile work # own new window, profile "work"
+node cli.js '{"action":"claim"}' --session NAME --here         # share the window focused now
+node cli.js '{"action":"release"}' --session NAME              # close the pinned tab, forget it
+node cli.js '{"action":"guard"}' --session NAME                # pull the tab back if it drifted
 ```
 
 Every other command also takes `--session NAME` (default `default` — omit only

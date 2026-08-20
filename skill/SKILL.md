@@ -13,10 +13,21 @@ the page. It works on **background tabs** — you do not need to steal Marcello'
 
 1. Relay must be running: `node server.js` (in `~/Documents/Development/custom-tools/chrome-bridge`).
    Check with `curl -s http://127.0.0.1:8756/` — it returns `{"server":"pilot","profiles":[...]}`.
-2. The extension must be connected. Ask Marcello to click **Connect** in the Pilot popup
-   if `profiles` is empty. **Do not ask twice.** If he already connected, just proceed.
+2. The extension must be connected per profile. Ask Marcello to click **Connect** in the
+   Pilot popup of each Chrome profile he wants you to drive, and give each profile a
+   distinct name in the Pilot options page. **Do not ask twice.** If it is already
+   connected, just proceed.
 3. Use `node cli.js --status` to see which profile(s) are connected and their names.
-   Target the right one with `--profile NAME` (default profile is `default`).
+
+## Pick a profile — `/bridge <profile>`
+
+`/bridge <profile>` points you at a connected Chrome profile: it claims your
+dedicated tab in that profile's shared agent-window (the first agent in the
+profile creates the window; later agents add their own tab to it) and pins the
+profile, so every later Pilot command in this session targets it automatically —
+no `--profile` flags needed. Run `/bridge` alone for status: connected profiles,
+and your tab pin. If the profile isn't connected, the claim reports it — ask
+Marcello to click Connect in that profile's popup (once).
 
 ## The commands
 
@@ -25,29 +36,29 @@ All commands go through the CLI. The CLI lives at:
 Add `--profile NAME` when the profile isn't the default. Add `--out FILE` to a `shot`
 to choose where the image lands.
 
-### One tab per agent — always pass `--session`
+### One tab per agent — own window per profile
 
 Every command takes `--session "$DSH_SESSION_ID"`. That is your unique agent id.
-The first command with a new session claims a dedicated background tab and pins
-it on disk; every later command drives that same tab. Your tab is yours — another
-agent with a different session id gets its own tab and can never hijack yours.
-Two agents in the same window get separate tabs; different windows and different
-Chrome profiles also work:
+The first command with a new session claims a dedicated tab in its **own new
+window** of the target profile and pins it on disk; every later command drives
+that same tab. Your tab is yours — another agent with a different session id
+gets its own tab and can never hijack yours. The profile is the boundary:
+`--profile NAME` picks which connected Chrome profile you work in, and you get
+a fresh window there. Opt in to sharing Marcello's windows with `--here`
+(the window focused right now) or `--window ID`:
 
 ```sh
-node cli.js '{"action":"snap"}' --session "$DSH_SESSION_ID"                  # same window
-node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --here          # the window Marcello is looking at
-node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --window 123    # given window
-node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --new-window    # own window
-node cli.js '{"action":"snap"}' --session "$DSH_SESSION_ID" --profile work   # other profile
+node cli.js '{"action":"snap"}' --session "$DSH_SESSION_ID"                  # own window, this profile
+node cli.js '{"action":"snap"}' --session "$DSH_SESSION_ID" --profile work   # own window, profile "work"
+node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --here          # share the window Marcello is looking at
+node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --window 123    # share a given window
 node cli.js '{"action":"release"}' --session "$DSH_SESSION_ID"   # close your tab when done
 node cli.js '{"action":"guard"}' --session "$DSH_SESSION_ID"     # pull the tab back if it drifted
 node cli.js --sessions                                           # see every agent's pin
 ```
 
 A claimed tab stays in the window it was claimed in — even when Marcello flips
-between windows — so `--here` is how you pin yourself to the window he points
-at, and `--window`/`--new-window` pin you to a specific or brand-new window.
+between windows — so agents work in their own windows and never disturb his.
 
 Never omit `--session`: without it every agent shares the "default" pin and you
 can collide with another driver.

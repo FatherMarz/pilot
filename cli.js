@@ -15,15 +15,18 @@
 //
 //   --session NAME      use the pinned tab for NAME (default "default")
 //   --tab ID            override: drive this exact tab id this once
-//   --window ID         place a claimed tab in that existing window
-//   --here              place a claimed tab in the window that is focused NOW
-//                       (so the agent stays where you pointed, not wherever
-//                       focus lands later)
-//   --new-window        place a claimed tab in a brand-new window
-//   --sessions          print the tab pins (~/.pilot/session.json)
+//   --window ID         share that existing window instead of the profile window
+//   --here              share the window that is focused NOW
+//   --new-window        force a brand-new window for this claim
+//   --sessions          print the tab pins and per-profile windows
 //   claim               (action) get/claim a dedicated tab and print its id
 //   release             (action) close the pinned tab and forget it
 //   guard               (action) if the pinned tab drifted off the last URL, re-navigate back
+//
+// Default placement: one shared agent-window per profile (~/.pilot/windows.json).
+// The first claim in a profile creates it; every agent working in that profile
+// adds its own tab to that same window, so they never compete and the user's
+// own windows stay untouched.
 //
 // The pin lives at ~/.pilot/session.json: { NAME: { tabId, windowId, url } }.
 //
@@ -99,20 +102,56 @@ function clearSession(name) {
   saveSessions(sessions);
 }
 
-// Create a dedicated tab for a session, honoring --window / --new-window so an
-// agent can live in its own window of the same profile. --here resolves the
-// window that is focused right now and pins the session there.
+// ── per-profile shared agent window ─────────────────────────────────────────
+// One agent-window per Chrome profile: the first agent in a profile creates
+// it, and every agent working in that profile adds its own tab to that same
+// window. Recorded at ~/.pilot/windows.json: { PROFILE: windowId }.
+
+function windowsFile() {
+  return path.join(os.homedir(), ".pilot", "windows.json");
+}
+
+function loadWindows() {
+  try {
+    return JSON.parse(fs.readFileSync(windowsFile(), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveWindows(windows) {
+  fs.mkdirSync(path.dirname(windowsFile()), { recursive: true });
+  fs.writeFileSync(windowsFile(), JSON.stringify(windows, null, 1));
+}
+
+// Create a dedicated tab for a session. Default: the profile's shared agent
+// window (first claim in the profile creates it; later claims add their own
+// tab to it). --window / --here opt into sharing a specific window instead.
 async function claimTab(opts) {
   let windowId = opts.window;
   if (opts.here && windowId == null) {
     const active = await request({ action: "activeTab" }, opts);
     if (active.ok && active.value) windowId = active.value.windowId;
   }
+  if (windowId == null) {
+    const profileKey = opts.profile || "default";
+    const known = loadWindows()[profileKey];
+    if (known != null) {
+      const wins = await request({ action: "windows" }, opts).catch(() => null);
+      const alive = wins && wins.ok && wins.value && wins.value.some((w) => w.id === known);
+      if (alive) windowId = known;
+    }
+  }
   const created = await request({
     action: "newHarnessTab",
-    ...(windowId != null ? { windowId } : {}),
-    ...(opts.newWindow ? { newWindow: true } : {}),
+    ...(windowId != null ? { windowId } : { newWindow: true }),
   }, opts);
+  if (windowId == null && created.ok && created.value && created.value.windowId) {
+    const profileKey = opts.profile || "default";
+    const windows = loadWindows();
+    windows[profileKey] = created.value.windowId;
+    saveWindows(windows);
+  }
   return created;
 }
 
@@ -131,7 +170,7 @@ async function run(cmd, opts) {
   }
 
   if (opts.sessions) {
-    console.log(JSON.stringify({ sessions: loadSessions() }, null, 1));
+    console.log(JSON.stringify({ sessions: loadSessions(), windows: loadWindows() }, null, 1));
     return;
   }
 
@@ -151,8 +190,8 @@ async function run(cmd, opts) {
       console.error(JSON.stringify({ ok: false, error: created.error }, null, 1));
       process.exit(1);
     }
-    setSession(opts.session, { tabId: created.value.tabId, url: null, windowId: created.value.windowId ?? null });
-    console.log(JSON.stringify({ ok: true, session: opts.session, tabId: created.value.tabId, windowId: created.value.windowId ?? null, reused: false }, null, 1));
+    setSession(opts.session, { tabId: created.value.tabId, url: null, windowId: created.value.windowId ?? null, profile: opts.profile || null });
+    console.log(JSON.stringify({ ok: true, session: opts.session, tabId: created.value.tabId, windowId: created.value.windowId ?? null, profile: opts.profile || null, reused: false }, null, 1));
     return;
   }
 
@@ -178,7 +217,7 @@ async function run(cmd, opts) {
     if (!info.ok || !info.value) {
       // The tab is gone. Re-claim a fresh one.
       const created = await claimTab(opts);
-      setSession(opts.session, { tabId: created.value.tabId, url: null, windowId: created.value.windowId ?? null });
+      setSession(opts.session, { tabId: created.value.tabId, url: null, windowId: created.value.windowId ?? null, profile: opts.profile || null });
       console.log(JSON.stringify({ ok: true, guarded: false, note: "tab was gone — re-claimed", tabId: created.value.tabId }, null, 1));
       return;
     }
@@ -210,7 +249,7 @@ async function run(cmd, opts) {
     if (tabId == null) {
       const created = await claimTab(opts);
       tabId = created.value.tabId;
-      setSession(opts.session, { tabId, url: null, windowId: created.value.windowId ?? null });
+      setSession(opts.session, { tabId, url: null, windowId: created.value.windowId ?? null, profile: opts.profile || null });
     }
     cmd = { ...cmd, tabId };
   }
@@ -224,7 +263,7 @@ async function run(cmd, opts) {
   // Remember where a navigate landed, so `guard` can pull the tab back.
   if (cmd.action === "navigate" && cmd.tabId != null) {
     const existing = getSession(opts.session);
-    setSession(opts.session, { tabId: cmd.tabId, url: cmd.url || null, windowId: existing?.windowId ?? null });
+    setSession(opts.session, { tabId: cmd.tabId, url: cmd.url || null, windowId: existing?.windowId ?? null, profile: existing?.profile ?? null });
   }
 
   const value = res.value;
@@ -261,7 +300,10 @@ function request(cmd, opts) {
 
     ws.on("open", () => {
       ws.send(JSON.stringify({ hello: "cli" }));
-      ws.send(JSON.stringify({ id, ...cmd, ...(opts.profile ? { profile: opts.profile } : {}) }));
+      // Auto-inject the session's pinned profile when no --profile was given,
+      // so a `/bridge <profile>` claim keeps every later command in that profile.
+      const profile = opts.profile || (getSession(opts.session || "default") || {}).profile || null;
+      ws.send(JSON.stringify({ id, ...cmd, ...(profile ? { profile } : {}) }));
     });
     ws.on("message", (d) => {
       const m = JSON.parse(d.toString());
@@ -284,8 +326,7 @@ function request(cmd, opts) {
   if (opts.status) return run(null, opts);
   if (opts.sessions) return run(null, opts);
   if (!opts.json) {
-    console.error("usage: node cli.js '<json command>' [--profile NAME] [--session NAME] [--tab ID] [--window ID | --here | --new-window] [--out FILE] | --status | --sessions");
-    process.exit(1);
+    console.error("usage: node cli.js '<json command>' [--profile NAME] [--session NAME] [--tab ID] [--window ID | --here | --new-window] [--out FILE] | --status | --sessions");    process.exit(1);
   }
   let cmd;
   try { cmd = JSON.parse(opts.json); } catch { console.error("bad JSON:", opts.json); process.exit(1); }
