@@ -17,12 +17,8 @@
 
 const DEFAULT_SETTINGS = {
   relayUrl: "ws://127.0.0.1:8756",
-  harnessUrl: "http://127.0.0.1:3080",
   profileName: "default",
   focusOnAction: false,
-  autoStartRelay: true,
-  groupName: "Harness",
-  groupColor: "red",
   shotMaxWidth: 1280,
   shotFormat: "jpeg", // "jpeg" | "png"
   shotQuality: 0.82,
@@ -32,19 +28,7 @@ const DEFAULT_SETTINGS = {
 let settings = { ...DEFAULT_SETTINGS };
 let ws = null;
 let retry = null;
-let intent = false; // user asked to connect — persisted in local storage so a
-                    // worker restart (or the reload action) reconnects; cleared
-                    // on browser start so the handshake stays per browser session
-const INTENT_KEY = "pilotConnectIntent";
-
-// chrome.storage.session is cleared by chrome.runtime.reload() in current
-// Chrome, which silently killed the bridge after `{"action":"reload"}`. The
-// intent therefore lives in local storage, cleared only on browser start:
-// a reload (which does not fire onStartup) keeps the intent, a full Chrome
-// quit drops it.
-chrome.runtime.onStartup.addListener(() => {
-  try { chrome.storage.local.remove(INTENT_KEY).catch(() => {}); } catch {}
-});
+let intent = false; // user asked to connect (not persisted across worker restarts)
 
 function loadSettings() {
   return new Promise((resolve) => {
@@ -52,28 +36,6 @@ function loadSettings() {
       settings = { ...DEFAULT_SETTINGS, ...got };
       resolve(settings);
     });
-  });
-}
-
-// Persist the connect intent in session storage: survives service-worker
-// restarts and extension reloads (chrome.runtime.reload), but Chrome fully
-// closing clears it, so the handshake stays a per-browser-session action.
-function saveIntent(value) {
-  intent = value;
-  try {
-    chrome.storage.local.set({ [INTENT_KEY]: value }).catch(() => {});
-  } catch {}
-}
-
-function loadIntent() {
-  return new Promise((resolve) => {
-    try {
-      chrome.storage.local.get(INTENT_KEY, (got) => {
-        resolve(!!got?.[INTENT_KEY]);
-      });
-    } catch {
-      resolve(false);
-    }
   });
 }
 
@@ -87,8 +49,6 @@ function currentState() {
     intent,
     profile: settings.profileName,
     relay: settings.relayUrl,
-    groupName: settings.groupName || "Harness",
-    groupColor: settings.groupColor || "red",
   };
 }
 
@@ -144,7 +104,7 @@ function actFunc(mode, a, b, c) {
   if (mode === "hrefs") {
     return [...document.querySelectorAll("a[href]")]
       .map((x) => ({ text: (x.innerText || "").trim().slice(0, 40), href: x.getAttribute("href") }))
-      .filter((x) => !x.href.startsWith("javascript:") && (a === "" || x.text === a))
+      .filter((x) => x.href.includes("plugin_asdk") || x.text === a)
       .slice(0, 10);
   }
   if (mode === "clickXY") {
@@ -233,7 +193,7 @@ function findTextFunc(text) {
   const out = [];
   for (const el of document.querySelectorAll("button, a, span, div, li, [role=button], [role=link], [role=tab]")) {
     const r = el.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) continue; // only visible elements
+    if (r.width <= 0 || r.x < 400) continue; // skip the sidebar/left rail
     const t = (el.innerText || "").trim();
     if (t.startsWith(text) && el.children.length <= 4) {
       out.push({ tag: el.tagName.toLowerCase(), role: el.getAttribute("role"), text: t.slice(0, 60), x: Math.round(r.x), y: Math.round(r.y) });
@@ -249,6 +209,36 @@ function fillFunc(sel, value) {
   Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
   el.dispatchEvent(new Event(el.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
   return "filled: " + sel;
+}
+// fillShadow pierces shadow roots and iframes to reach an input by a partial
+// match on name, placeholder, aria-label, or data-testid. Stripe's hosted
+// checkout renders its fields inside shadow DOM, where querySelector cannot
+// go, so the normal fill action never finds them.
+function fillShadowFunc(value) {
+  const seen = new Set();
+  const walk = (root) => {
+    for (const el of root.querySelectorAll("input, textarea, select")) {
+      const key = el === document.activeElement;
+      const id = [el.name, el.placeholder, el.getAttribute("aria-label"), el.getAttribute("data-testid")]
+        .filter(Boolean).join("|").toLowerCase();
+      if (id.includes("machine") || id.includes("ids")) {
+        const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype :
+          el.tagName === "SELECT" ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        return "filled shadow: " + id;
+      }
+    }
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+        seen.add(el.shadowRoot);
+        const r = walk(el.shadowRoot);
+        if (r) return r;
+      }
+    }
+    return null;
+  };
+  return walk(document) || "NOT FOUND shadow machine field";
 }
 function dialogFunc() {
   const d = document.querySelector("[role=dialog]");
@@ -269,123 +259,14 @@ function formFunc() {
       text: (r.innerText || r.getAttribute("aria-label") || r.value || "").trim().slice(0, 40),
       checked: r.checked,
     })),
-    errors: ((scope.textContent || scope.innerText || "").match(/[Ee]rror[^\n]{0,100}|required[^\n]{0,100}|must[^\n]{0,100}/g) || []).slice(0, 5),
-  };
-}
-// Deep page snapshot: metadata, headings, links, forms, images, text.
-function pageFunc() {
-  const meta = {};
-  for (const m of document.querySelectorAll("meta")) {
-    const key = m.name || m.getAttribute("property") || "";
-    if (key && !meta[key]) meta[key] = (m.content || "").slice(0, 300);
-  }
-  const head = (el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 100);
-  return {
-    title: document.title,
-    url: location.href,
-    meta,
-    lang: document.documentElement.lang || "",
-    headings: [...document.querySelectorAll("h1,h2,h3")].map(head).filter(Boolean).slice(0, 40),
-    links: [...document.querySelectorAll("a[href]")]
-      .map((a) => ({ text: head(a), href: a.href }))
-      .filter((l) => l.href && !l.href.startsWith("javascript:"))
-      .slice(0, 120),
-    forms: [...document.querySelectorAll("form")].map((f) => ({
-      action: f.action || "", method: f.method || "get",
-      fields: [...f.querySelectorAll("input,select,textarea,button")].map((i) => ({
-        tag: i.tagName.toLowerCase(), name: i.name || i.id || "", type: i.type || "",
-        placeholder: i.placeholder || "", value: (i.value || "").slice(0, 40),
-        text: head(i),
-      })).slice(0, 30),
-    })).slice(0, 15),
-    images: [...document.querySelectorAll("img[src]")].map((i) => ({
-      src: i.currentSrc || i.src || "", alt: i.alt || "", w: i.naturalWidth, h: i.naturalHeight,
-    })).filter((i) => i.src && i.src.startsWith("http")).slice(0, 40),
-    text: (document.body && document.body.innerText || "").slice(0, 5000),
-  };
-}
-// Arbitrary JS in the page context. Result is JSON-serialized (objects) or a
-// short string; errors come back with their message.
-function evalFunc(code) {
-  try {
-    const value = (0, eval)(code);
-    if (value === undefined) return { ok: true, value: null, type: "undefined" };
-    if (typeof value === "object" && value !== null) {
-      return { ok: true, value: JSON.parse(JSON.stringify(value)), type: "json" };
-    }
-    return { ok: true, value: String(value), type: typeof value };
-  } catch (e) {
-    return { ok: false, error: String((e && e.message) || e) };
-  }
-}
-// Scroll the page; returns the new scroll position.
-function scrollFunc(dx, dy, behavior) {
-  window.scrollBy({ top: dy, left: dx, behavior: behavior || "auto" });
-  return { x: Math.round(window.scrollX), y: Math.round(window.scrollY) };
-}
-// Element inspector: rect, tag, text, attributes, computed role — for
-// coordinate-based agents that need to know what is under a point.
-function inspectFunc(x, y) {
-  const el = document.elementFromPoint(x, y);
-  if (!el) return null;
-  const r = el.getBoundingClientRect();
-  const attrs = {};
-  for (const a of el.attributes || []) attrs[a.name] = a.value.slice(0, 120);
-  return {
-    tag: el.tagName.toLowerCase(),
-    text: (el.innerText || el.value || el.getAttribute("aria-label") || "").trim().slice(0, 120),
-    x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height),
-    role: el.getAttribute("role") || "",
-    attrs,
+    errors: (scope.innerText.match(/[Ee]rror[^\n]{0,100}|required[^\n]{0,100}|must[^\n]{0,100}/g) || []).slice(0, 5),
   };
 }
 
 // ── WebSocket management ────────────────────────────────────────────────────
 
-// Ask the harness to start the local relay if it isn't running. The extension
-// cannot spawn processes, so it calls the harness's /api/_relay/start hook.
-// Returns true when the relay is (or became) reachable; the caller always
-// attempts the socket regardless, because the harness hook may be missing
-// (harness not restarted) while the relay itself is already up.
-async function ensureRelay() {
-  if (settings.autoStartRelay === false) return wsReachable();
-  try {
-    const res = await fetch(`${settings.harnessUrl}/api/_relay/start`, { method: "POST", cache: "no-store" });
-    if (res.ok) {
-      const body = await res.json().catch(() => null);
-      if (body && body.ok) return true;
-    }
-  } catch {
-    // harness unreachable — fall through and just try the socket
-  }
-  return wsReachable();
-}
-
-async function connect() {
+function connect() {
   if (retry) { clearTimeout(retry); retry = null; }
-  setState("connecting");
-  // If nothing is listening, ask the harness to start the relay first.
-  if (!(await wsReachable())) {
-    await ensureRelay();
-  }
-  openSocket();
-}
-
-function wsReachable() {
-  return new Promise((resolve) => {
-    try {
-      const probe = new WebSocket(settings.relayUrl);
-      const done = (ok) => { try { probe.close(); } catch {} resolve(ok); };
-      probe.onopen = () => done(true);
-      probe.onerror = () => done(false);
-      setTimeout(() => done(false), 1500);
-    } catch {
-      resolve(false);
-    }
-  });
-}
-
-function openSocket() {
   try {
     ws = new WebSocket(settings.relayUrl);
   } catch { scheduleRetry(); return; }
@@ -420,7 +301,7 @@ function scheduleRetry() {
 }
 
 function disconnect() {
-  saveIntent(false);
+  intent = false;
   if (retry) { clearTimeout(retry); retry = null; }
   try { if (ws) ws.close(); } catch {}
   ws = null;
@@ -432,35 +313,15 @@ function disconnect() {
 function shouldBringForward(action) {
   if (!settings.focusOnAction) return false;
   // Pure metadata actions never need focus.
-  return !METADATA_ACTIONS.has(action);
+  return !["ping", "tabs", "harnessTab", "newHarnessTab", "reload", "status"].includes(action);
 }
-
-// Actions that never touch a tab: they must not create or steal one.
-const METADATA_ACTIONS = new Set([
-  "ping", "status", "tabs", "windows", "groups", "activeTab",
-  "harnessTab", "newHarnessTab", "reload",
-]);
-
-// Actions that still target a tab but must never bring it forward even when
-// focusOnAction is on (they are read-only or background-ish).
-const NON_FOCUS_ACTIONS = new Set([
-  "snap", "page", "eval", "scroll", "inspect", "dialog", "form", "tail",
-  "findText", "shot", "screenshot", "reloadTab",
-]);
 
 async function dispatchAction(msg, reply) {
   const action = msg.action;
-
-  // Metadata actions run without resolving a tab at all.
-  if (METADATA_ACTIONS.has(action)) {
-    const value = await runMetadataAction(action, msg);
-    return value;
-  }
-
   const tab = await targetTab(msg.tabId);
   await ensureGrouped(tab);
 
-  if (shouldBringForward(action) && !NON_FOCUS_ACTIONS.has(action)) {
+  if (shouldBringForward(action)) {
     await bringForward(tab).catch(() => {});
   }
 
@@ -482,10 +343,6 @@ async function dispatchAction(msg, reply) {
     case "reload": { setTimeout(() => chrome.runtime.reload(), 400); return "reloading"; }
     case "status": return currentState();
     case "snap": return await run(snapFunc, []);
-    case "page": return await run(pageFunc, []);
-    case "eval": return await evalViaCdp(tab.id, String(msg.code ?? ""));
-    case "scroll": return await run(scrollFunc, [Number(msg.dx || 0), Number(msg.dy || 0), String(msg.behavior || "auto")]);
-    case "inspect": return await run(inspectFunc, [Number(msg.x), Number(msg.y)]);
     case "dialog": return await run(dialogFunc, []);
     case "form": return await run(formFunc, []);
     case "click": return await run(actFunc, ["click", String(msg.sel || "")]);
@@ -496,94 +353,47 @@ async function dispatchAction(msg, reply) {
     case "clickText": return await run(actFunc, ["clickText", String(msg.text || ""), null, Boolean(msg.exact)]);
     case "findText": return await run(findTextFunc, [String(msg.text || "")]);
     case "fill": return await run(fillFunc, [String(msg.sel || ""), String(msg.value ?? "")]);
+    case "fillShadow": return await run(fillShadowFunc, [String(msg.value || "")]);
     case "type": return await run(actFunc, ["type", String(msg.sel || ""), String(msg.text || "")]);
     case "replace": return await run(actFunc, ["replace", String(msg.sel || ""), String(msg.text || "")]);
     case "shot":
     case "screenshot":
       return await takeScreenshot(tab, msg);
     case "navigate": { await chrome.tabs.update(tab.id, { url: msg.url }); return "navigated"; }
-    case "reloadTab": { await chrome.tabs.reload(tab.id); return "reloading tab"; }
-    case "tabInfo": {
-      const t = await chrome.tabs.get(msg.tabId != null ? msg.tabId : tab.id);
-      return { id: t.id, url: t.url || "", title: t.title || "", groupId: t.groupId, windowId: t.windowId, active: t.active, pinned: t.pinned, index: t.index };
-    }
-    case "closeTab": { await chrome.tabs.remove(tab.id); return "closed"; }
-    case "ungroup": { await chrome.tabs.ungroup(tab.id); return "ungrouped"; }
-    case "duplicate": {
-      const dup = await chrome.tabs.duplicate(tab.id);
-      return { tabId: dup.id, url: dup.url || "" };
-    }
-    case "pin": { await chrome.tabs.update(tab.id, { pinned: true }); return "pinned"; }
-    case "unpin": { await chrome.tabs.update(tab.id, { pinned: false }); return "unpinned"; }
-    default:
-      return reply({ ok: false, error: "unknown action" }) ?? undefined;
-  }
-}
-
-// Metadata actions: run without touching any tab (never steal or create one).
-async function runMetadataAction(action, msg) {
-  switch (action) {
-    case "ping": return "v7";
-    case "status": return currentState();
     case "tabs": {
       const tabs = await chrome.tabs.query({});
-      const windows = await chrome.windows.getAll({ populate: false }).catch(() => []);
-      const winById = new Map(windows.map((w) => [w.id, w]));
-      const groups = await chrome.tabGroups.query({}).catch(() => []);
-      const groupById = new Map(groups.map((g) => [g.id, g]));
-      return tabs.map((t) => ({
-        id: t.id,
-        url: t.url || "",
-        title: t.title || "",
-        groupId: t.groupId,
-        groupTitle: t.groupId !== -1 ? (groupById.get(t.groupId)?.title ?? "") : "",
-        windowId: t.windowId,
-        windowFocused: winById.get(t.windowId)?.focused ?? false,
-        index: t.index,
-        active: t.active,
-        pinned: t.pinned,
-        muted: t.mutedInfo?.muted ?? false,
-        audible: t.audible ?? false,
-        discarded: t.discarded ?? false,
-        status: t.status ?? "",
-      }));
-    }
-    case "windows": {
-      const windows = await chrome.windows.getAll({ populate: false });
-      return windows.map((w) => ({
-        id: w.id, focused: w.focused, type: w.type, state: w.state,
-        width: w.width, height: w.height, tabs: w.tabs ? w.tabs.length : undefined,
-      }));
-    }
-    case "groups": {
-      const groups = await chrome.tabGroups.query({}).catch(() => []);
-      return groups.map((g) => ({
-        id: g.id, title: g.title, color: g.color, windowId: g.windowId, collapsed: g.collapsed,
-      }));
-    }
-    case "activeTab": {
-      const [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      return t ? { tabId: t.id, windowId: t.windowId, url: t.url || "", title: t.title || "" } : null;
+      return tabs.map((t) => ({ id: t.id, url: t.url || "", title: t.title || "", groupId: t.groupId, windowId: t.windowId, active: t.active }));
     }
     case "harnessTab": {
-      const found = await findHarnessTab();
+      const groups = await chrome.tabGroups.query({ title: "Harness" }).catch(() => []);
+      let found = null;
+      for (const g of groups) {
+        const tabs = await chrome.tabs.query({ groupId: g.id });
+        if (!tabs || !tabs.length) continue;
+        const candidate = tabs.find((t) => !(t.url || "").includes("127.0.0.1:3080"));
+        if (candidate) { found = candidate; break; }
+      }
       return found
         ? { tabId: found.id, windowId: found.windowId, url: found.url || "", title: found.title || "" }
         : null;
     }
     case "newHarnessTab": {
-      const created = await createHarnessTab(msg?.url, {
-        windowId: msg?.windowId,
-        newWindow: Boolean(msg?.newWindow),
-      });
-      return { tabId: created.id, groupId: created.groupId ?? -1, url: created.url || "", windowId: created.windowId };
-    }
-    case "reload": {
-      setTimeout(() => chrome.runtime.reload(), 400);
-      return "reloading";
+      const tab = await chrome.tabs.create({ url: msg.url || "about:blank", active: false });
+      const groups = await chrome.tabGroups.query({ title: "Harness" }).catch(() => []);
+      let groupId = -1;
+      if (groups && groups.length) {
+        try { groupId = await chrome.tabs.group({ tabIds: [tab.id], groupId: groups[0].id }); } catch { groupId = -1; }
+      }
+      if (groupId === -1) {
+        try {
+          groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+          await chrome.tabGroups.update(groupId, { title: "Harness", color: "red" }).catch(() => {});
+        } catch {}
+      }
+      return { tabId: tab.id, groupId, url: tab.url || "" };
     }
     default:
-      return undefined;
+      return reply({ ok: false, error: "unknown action" }) ?? undefined;
   }
 }
 
@@ -620,80 +430,17 @@ function tabIsActive(tab) {
   return chrome.tabs.query({ active: true, windowId: tab.windowId }).then((t) => t[0] && t[0].id === tab.id);
 }
 
-// Attach to a tab's debugger, recovering from a stale attach left by a
-// previous interrupted command. Chrome allows one debugger per tab; if a
-// screenshot/eval was killed between attach and detach, the tab stays wedged
-// ("Another debugger is already attached") until Chrome restarts. We detach
-// first (ours or a dead peer's), then attach fresh.
-function attachDebugger(tabId) {
-  return new Promise((resolve, reject) => {
-    const tryAttach = () => {
-      chrome.debugger.attach({ tabId }, "1.3", () => {
-        if (!chrome.runtime.lastError) return resolve();
-        // Already attached — recover by detaching (best-effort) and retrying once.
-        chrome.debugger.detach({ tabId }, () => {
-          chrome.debugger.attach({ tabId }, "1.3", () => {
-            if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-            resolve();
-          });
-        });
-      });
-    };
-    tryAttach();
-  });
-}
-
-function detachDebugger(tabId) {
-  return new Promise((resolve) => {
-    chrome.debugger.detach({ tabId }, () => resolve());
-  });
-}
-
 function cdpScreenshot(tabId, format) {
   return new Promise((resolve, reject) => {
-    attachDebugger(tabId).then(() => {
+    chrome.debugger.attach({ tabId }, "1.3", () => {
+      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
       chrome.debugger.sendCommand({ tabId }, "Page.captureScreenshot", { format }, (res) => {
-        const err = chrome.runtime.lastError;
-        detachDebugger(tabId);
-        if (err) return reject(new Error(err.message));
+        chrome.debugger.detach({ tabId }, () => {});
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
         if (!res || !res.data) return reject(new Error("no screenshot data"));
         resolve(`data:image/png;base64,${res.data}`);
       });
-    }).catch(reject);
-  });
-}
-
-// Run arbitrary JS in the page's main world via CDP. Unlike the isolated
-// world, Runtime.evaluate is not subject to the page's (or the extension's)
-// CSP, so eval works even on strict pages. The page context is real: the
-// code sees the page's own JS globals, not the isolated world's.
-function evalViaCdp(tabId, code) {
-  return new Promise((resolve, reject) => {
-    attachDebugger(tabId).then(() => {
-      chrome.debugger.sendCommand(
-        { tabId },
-        "Runtime.evaluate",
-        { expression: code, returnByValue: true, awaitPromise: true },
-        (res) => {
-          const err = chrome.runtime.lastError;
-          detachDebugger(tabId);
-          if (err) return reject(new Error(err.message));
-          if (!res) return reject(new Error("no eval result"));
-          if (res.exceptionDetails) {
-            const detail = res.exceptionDetails.exception?.description || res.exceptionDetails.text || "exception";
-            return resolve({ ok: false, error: detail });
-          }
-          const r = res.result;
-          if (r?.type === "undefined" || r?.type === "symbol" || r?.type === "function") {
-            return resolve({ ok: true, value: null, type: r.type });
-          }
-          if (r?.type === "object" && !r.value) {
-            return resolve({ ok: true, value: null, type: "object" });
-          }
-          return resolve({ ok: true, value: r?.value ?? r?.description ?? null, type: r?.type });
-        }
-      );
-    }).catch(reject);
+    });
   });
 }
 
@@ -732,94 +479,18 @@ function blobToDataUrl(blob) {
 
 // ── Tab helpers ─────────────────────────────────────────────────────────────
 
-// Resolve which tab a command drives.
-//   - Explicit tabId → that tab.
-//   - No tabId → an existing Harness-grouped tab (any window), or a freshly
-//     created background one. NEVER the user's active tab: the harness must
-//     not hijack what the user is looking at.
 function targetTab(tabId) {
   if (tabId != null) return chrome.tabs.get(tabId);
-  return findHarnessTab().then((found) => {
-    if (found) return found;
-    return createHarnessTab();
-  });
+  return chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((t) => t[0]);
 }
 
-// Find a tab already in a group with the configured name, in ANY Chrome
-// window. Never the harness GUI tab itself (127.0.0.1:3080) — navigating
-// that away kills the working surface.
-async function findHarnessTab() {
-  const name = settings.groupName || "Harness";
-  const groups = await chrome.tabGroups.query({ title: name }).catch(() => []);
-  for (const g of groups) {
-    const tabs = await chrome.tabs.query({ groupId: g.id });
-    if (!tabs || !tabs.length) continue;
-    const candidate = tabs.find((t) => !(t.url || "").includes("127.0.0.1:3080"));
-    if (candidate) return candidate;
-  }
-  return null;
-}
-
-// Create a background grouped tab (never steals focus). Uses the configured
-// group name and color, creating the group on first use.
-//   opts.windowId  → place the tab in that existing window
-//   opts.newWindow → open a brand-new window for this tab
-// Without either it lands in the last-focused window. This lets separate
-// agents own tabs in separate windows of the same profile.
-async function createHarnessTab(url, opts = {}) {
-  const name = settings.groupName || "Harness";
-  const color = settings.groupColor || "red";
-  const targetUrl = url || "about:blank";
-
-  let tab;
-  if (opts.newWindow) {
-    const win = await chrome.windows.create({ url: targetUrl, focused: false });
-    tab = (win.tabs && win.tabs[0]) || null;
-    if (!tab) throw new Error("new window created no tab");
-  } else {
-    const createOpts = { url: targetUrl, active: false };
-    if (opts.windowId != null) createOpts.windowId = opts.windowId;
-    tab = await chrome.tabs.create(createOpts);
-  }
-
-  // Group under the configured name — but only when the tab's window is
-  // focused. On current Chrome builds, `chrome.tabs.group` without a groupId
-  // relocates a tab from a background window into the focused window (and an
-  // emptied source window then closes). That made "own window / own tab"
-  // claims hijack the user's active window. Background-window tabs stay
-  // ungrouped so they stay where they were asked to live.
-  const win = await chrome.windows.get(tab.windowId).catch(() => null);
-  if (win && win.focused) {
-    const groups = await chrome.tabGroups.query({ title: name }).catch(() => []);
-    const sameWindow = groups.find((g) => g.windowId === tab.windowId);
-    try {
-      if (sameWindow) {
-        await chrome.tabs.group({ tabIds: [tab.id], groupId: sameWindow.id });
-      } else {
-        const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
-        await chrome.tabGroups.update(groupId, { title: name, color }).catch(() => {});
-      }
-    } catch {}
-  }
-  // Return the fresh tab object so the response reflects where the tab really
-  // is (some Chrome builds move an API-created tab to the focused window).
-  return chrome.tabs.get(tab.id);
-}
-
-// Mark a tab Pilot is driving so it is obvious on screen: a colored group
-// with the configured name. Only groups tabs Pilot owns (created here);
-// never the user's active tab, because targetTab never returns that. Skips
-// tabs in background windows — grouping those would yank them into the
-// focused window (see createHarnessTab).
+// Mark the tab the harness is driving so it is obvious on screen: a red
+// "Harness" tab group. Creates the group on first use.
 async function ensureGrouped(tab) {
   if (tab.groupId !== -1) return tab.groupId;
-  const win = await chrome.windows.get(tab.windowId).catch(() => null);
-  if (!win || !win.focused) return -1;
-  const name = settings.groupName || "Harness";
-  const color = settings.groupColor || "red";
   try {
     const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
-    await chrome.tabGroups.update(groupId, { title: name, color }).catch(() => {});
+    await chrome.tabGroups.update(groupId, { title: "Harness", color: "red" }).catch(() => {});
     return groupId;
   } catch (e) {
     return -1;
@@ -848,7 +519,7 @@ try {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "connect") {
-    saveIntent(true);
+    intent = true;
     try { if (ws) ws.close(); } catch {}
     connect();
     sendResponse({ state: "connecting", ...currentState() });
@@ -871,13 +542,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
-// Startup: load settings, then reconnect if the user had connected before
-// this worker's life — session storage survives reloads and worker restarts
-// (only a full Chrome quit clears it, so the handshake stays per session).
-loadSettings().then(async () => {
-  const wasConnected = await loadIntent();
-  if (wasConnected) {
-    intent = true;
-    connect();
-  }
-});
+// The worker starts with intent=false: no connect() call here. The popup's
+// Connect button is the handshake.
+loadSettings();

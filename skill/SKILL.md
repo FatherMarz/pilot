@@ -9,6 +9,16 @@ Pilot is a local bridge: a Chrome extension + a relay + a CLI. You command the C
 the relay routes to the connected Chrome profile, the extension clicks/types/snapshots
 the page. It works on **background tabs** — you do not need to steal Marcello's window.
 
+**Scope: browsers only.** Pilot drives Chrome tabs and nothing else. If the task
+targets anything outside a browser — a native app, the desktop, Finder, a system
+dialog, the menu bar — use the **computer-use** skill instead. Never use pilot
+for non-browser work.
+
+**Prefer the driver.** When the `browser_driver` tool is available, delegate the
+control loop to it: it runs on a browser-capable model. Call `browser_driver` with
+the task in plain words; it loads this skill itself, drives the CLI, and reports
+back. Fall back to driving the CLI directly only if `browser_driver` is unavailable.
+
 ## Before you start (the handshake)
 
 1. Relay must be running: `node server.js` (in `~/Documents/Development/custom-tools/pilot`).
