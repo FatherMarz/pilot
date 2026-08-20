@@ -71,7 +71,9 @@ function createRelay(port = DEFAULT_PORT) {
 
       // ── Extension connects: the handshake ─────────────────────────────
       if (msg.hello === "extension") {
-        const profile = String(msg.profile || "default").slice(0, 64);
+        // Profile names are matched case-insensitively so "Cabreza" and
+        // "cabreza" are the same profile.
+        const profile = String(msg.profile || "default").slice(0, 64).toLowerCase();
         const stale = extensions.get(profile);
         if (stale && stale !== ws) {
           try { stale.close(1000, "replaced by newer Pilot connection"); } catch {}
@@ -117,7 +119,7 @@ function createRelay(port = DEFAULT_PORT) {
 
       // ── CLI command → forward to the right profile ─────────────────────
       if (ws.hello === "cli") {
-        const profile = String(msg.profile || "default").slice(0, 64);
+        const profile = String(msg.profile || "default").slice(0, 64).toLowerCase();
         const id = msg.id || Math.floor(Math.random() * 1e9);
         const reply = (s) => ws.send(s);
         const body = { ...msg };
