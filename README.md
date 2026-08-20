@@ -72,10 +72,13 @@ node cli.js --sessions                                # every agent's tab pin (~
 Every agent passes `--session NAME` (use your agent id, e.g. `$DSH_SESSION_ID`).
 The first command with a new session claims a dedicated background tab and pins
 it on disk; later commands drive that same tab, so two agents can never hijack
-each other. Same window = separate tabs; `--new-window` / `--window ID` = separate
-windows; `--profile NAME` = separate Chrome profiles.
+each other. Same window = separate tabs; `--here` / `--window ID` / `--new-window`
+= separate windows; `--profile NAME` = separate Chrome profiles. A claimed tab
+stays in the window it was claimed in — flipping focus between windows never
+moves it.
 
 ```sh
+node cli.js '{"action":"claim"}' --session NAME --here          # pin to the window that is focused now
 node cli.js '{"action":"claim"}' --session NAME --new-window    # claim, in a new window
 node cli.js '{"action":"release"}' --session NAME               # close the pinned tab, forget it
 node cli.js '{"action":"guard"}' --session NAME                 # pull the tab back if it drifted

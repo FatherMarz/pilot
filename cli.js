@@ -16,13 +16,16 @@
 //   --session NAME      use the pinned tab for NAME (default "default")
 //   --tab ID            override: drive this exact tab id this once
 //   --window ID         place a claimed tab in that existing window
+//   --here              place a claimed tab in the window that is focused NOW
+//                       (so the agent stays where you pointed, not wherever
+//                       focus lands later)
 //   --new-window        place a claimed tab in a brand-new window
 //   --sessions          print the tab pins (~/.pilot/session.json)
 //   claim               (action) get/claim a dedicated tab and print its id
 //   release             (action) close the pinned tab and forget it
 //   guard               (action) if the pinned tab drifted off the last URL, re-navigate back
 //
-// The pin lives at ~/.pilot/session.json: { NAME: { tabId, url } }.
+// The pin lives at ~/.pilot/session.json: { NAME: { tabId, windowId, url } }.
 //
 // Screenshot results are written to disk automatically when --out is given
 // (default: ~/.pilot/shots/<timestamp>.<ext>). Print the path so the harness
@@ -37,7 +40,7 @@ const argv = process.argv.slice(2);
 const RELAY = process.env.PILOT_RELAY || "ws://127.0.0.1:8756";
 
 function parseArgs(argv) {
-  const out = { profile: null, out: null, json: null, session: "default", tab: null, window: null, newWindow: false };
+  const out = { profile: null, out: null, json: null, session: "default", tab: null, window: null, newWindow: false, here: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--profile") out.profile = argv[++i];
@@ -46,6 +49,7 @@ function parseArgs(argv) {
     else if (a === "--tab") out.tab = Number(argv[++i]);
     else if (a === "--window") out.window = Number(argv[++i]);
     else if (a === "--new-window") out.newWindow = true;
+    else if (a === "--here") out.here = true;
     else if (a === "--relay") { /* handled via env, kept for compat */ }
     else if (a === "--status") out.status = true;
     else if (a === "--sessions") out.sessions = true;
@@ -96,11 +100,17 @@ function clearSession(name) {
 }
 
 // Create a dedicated tab for a session, honoring --window / --new-window so an
-// agent can live in its own window of the same profile.
+// agent can live in its own window of the same profile. --here resolves the
+// window that is focused right now and pins the session there.
 async function claimTab(opts) {
+  let windowId = opts.window;
+  if (opts.here && windowId == null) {
+    const active = await request({ action: "activeTab" }, opts);
+    if (active.ok && active.value) windowId = active.value.windowId;
+  }
   const created = await request({
     action: "newHarnessTab",
-    ...(opts.window != null ? { windowId: opts.window } : {}),
+    ...(windowId != null ? { windowId } : {}),
     ...(opts.newWindow ? { newWindow: true } : {}),
   }, opts);
   return created;
@@ -132,7 +142,7 @@ async function run(cmd, opts) {
       // Verify the pinned tab still exists before reusing it.
       const info = await request({ action: "tabInfo", tabId: existing.tabId }, opts);
       if (info.ok && info.value) {
-        console.log(JSON.stringify({ ok: true, session: opts.session, tabId: existing.tabId, url: info.value.url, reused: true }, null, 1));
+        console.log(JSON.stringify({ ok: true, session: opts.session, tabId: existing.tabId, windowId: info.value.windowId ?? null, url: info.value.url, reused: true }, null, 1));
         return;
       }
     }
@@ -141,8 +151,8 @@ async function run(cmd, opts) {
       console.error(JSON.stringify({ ok: false, error: created.error }, null, 1));
       process.exit(1);
     }
-    setSession(opts.session, { tabId: created.value.tabId, url: null });
-    console.log(JSON.stringify({ ok: true, session: opts.session, tabId: created.value.tabId, reused: false }, null, 1));
+    setSession(opts.session, { tabId: created.value.tabId, url: null, windowId: created.value.windowId ?? null });
+    console.log(JSON.stringify({ ok: true, session: opts.session, tabId: created.value.tabId, windowId: created.value.windowId ?? null, reused: false }, null, 1));
     return;
   }
 
@@ -168,7 +178,7 @@ async function run(cmd, opts) {
     if (!info.ok || !info.value) {
       // The tab is gone. Re-claim a fresh one.
       const created = await claimTab(opts);
-      setSession(opts.session, { tabId: created.value.tabId, url: null });
+      setSession(opts.session, { tabId: created.value.tabId, url: null, windowId: created.value.windowId ?? null });
       console.log(JSON.stringify({ ok: true, guarded: false, note: "tab was gone — re-claimed", tabId: created.value.tabId }, null, 1));
       return;
     }
@@ -200,7 +210,7 @@ async function run(cmd, opts) {
     if (tabId == null) {
       const created = await claimTab(opts);
       tabId = created.value.tabId;
-      setSession(opts.session, { tabId, url: null });
+      setSession(opts.session, { tabId, url: null, windowId: created.value.windowId ?? null });
     }
     cmd = { ...cmd, tabId };
   }
@@ -214,7 +224,7 @@ async function run(cmd, opts) {
   // Remember where a navigate landed, so `guard` can pull the tab back.
   if (cmd.action === "navigate" && cmd.tabId != null) {
     const existing = getSession(opts.session);
-    setSession(opts.session, { tabId: cmd.tabId, url: cmd.url || null });
+    setSession(opts.session, { tabId: cmd.tabId, url: cmd.url || null, windowId: existing?.windowId ?? null });
   }
 
   const value = res.value;
@@ -274,7 +284,7 @@ function request(cmd, opts) {
   if (opts.status) return run(null, opts);
   if (opts.sessions) return run(null, opts);
   if (!opts.json) {
-    console.error("usage: node cli.js '<json command>' [--profile NAME] [--session NAME] [--tab ID] [--window ID | --new-window] [--out FILE] | --status | --sessions");
+    console.error("usage: node cli.js '<json command>' [--profile NAME] [--session NAME] [--tab ID] [--window ID | --here | --new-window] [--out FILE] | --status | --sessions");
     process.exit(1);
   }
   let cmd;

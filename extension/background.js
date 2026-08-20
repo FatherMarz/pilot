@@ -144,7 +144,7 @@ function actFunc(mode, a, b, c) {
   if (mode === "hrefs") {
     return [...document.querySelectorAll("a[href]")]
       .map((x) => ({ text: (x.innerText || "").trim().slice(0, 40), href: x.getAttribute("href") }))
-      .filter((x) => x.href.includes("plugin_asdk") || x.text === a)
+      .filter((x) => !x.href.startsWith("javascript:") && (a === "" || x.text === a))
       .slice(0, 10);
   }
   if (mode === "clickXY") {
@@ -233,7 +233,7 @@ function findTextFunc(text) {
   const out = [];
   for (const el of document.querySelectorAll("button, a, span, div, li, [role=button], [role=link], [role=tab]")) {
     const r = el.getBoundingClientRect();
-    if (r.width <= 0 || r.x < 400) continue; // skip the sidebar/left rail
+    if (r.width <= 0 || r.height <= 0) continue; // only visible elements
     const t = (el.innerText || "").trim();
     if (t.startsWith(text) && el.children.length <= 4) {
       out.push({ tag: el.tagName.toLowerCase(), role: el.getAttribute("role"), text: t.slice(0, 60), x: Math.round(r.x), y: Math.round(r.y) });
@@ -269,7 +269,7 @@ function formFunc() {
       text: (r.innerText || r.getAttribute("aria-label") || r.value || "").trim().slice(0, 40),
       checked: r.checked,
     })),
-    errors: (scope.innerText.match(/[Ee]rror[^\n]{0,100}|required[^\n]{0,100}|must[^\n]{0,100}/g) || []).slice(0, 5),
+    errors: ((scope.textContent || scope.innerText || "").match(/[Ee]rror[^\n]{0,100}|required[^\n]{0,100}|must[^\n]{0,100}/g) || []).slice(0, 5),
   };
 }
 // Deep page snapshot: metadata, headings, links, forms, images, text.
@@ -508,6 +508,7 @@ async function dispatchAction(msg, reply) {
       return { id: t.id, url: t.url || "", title: t.title || "", groupId: t.groupId, windowId: t.windowId, active: t.active, pinned: t.pinned, index: t.index };
     }
     case "closeTab": { await chrome.tabs.remove(tab.id); return "closed"; }
+    case "ungroup": { await chrome.tabs.ungroup(tab.id); return "ungrouped"; }
     case "duplicate": {
       const dup = await chrome.tabs.duplicate(tab.id);
       return { tabId: dup.id, url: dup.url || "" };
@@ -781,26 +782,39 @@ async function createHarnessTab(url, opts = {}) {
     tab = await chrome.tabs.create(createOpts);
   }
 
-  // Group under the configured name. A tab group id is scoped to one window,
-  // so reuse an existing group only when it lives in this same window.
-  const groups = await chrome.tabGroups.query({ title: name }).catch(() => []);
-  const sameWindow = groups.find((g) => g.windowId === tab.windowId);
-  try {
-    if (sameWindow) {
-      await chrome.tabs.group({ tabIds: [tab.id], groupId: sameWindow.id });
-    } else {
-      const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
-      await chrome.tabGroups.update(groupId, { title: name, color }).catch(() => {});
-    }
-  } catch {}
-  return tab;
+  // Group under the configured name — but only when the tab's window is
+  // focused. On current Chrome builds, `chrome.tabs.group` without a groupId
+  // relocates a tab from a background window into the focused window (and an
+  // emptied source window then closes). That made "own window / own tab"
+  // claims hijack the user's active window. Background-window tabs stay
+  // ungrouped so they stay where they were asked to live.
+  const win = await chrome.windows.get(tab.windowId).catch(() => null);
+  if (win && win.focused) {
+    const groups = await chrome.tabGroups.query({ title: name }).catch(() => []);
+    const sameWindow = groups.find((g) => g.windowId === tab.windowId);
+    try {
+      if (sameWindow) {
+        await chrome.tabs.group({ tabIds: [tab.id], groupId: sameWindow.id });
+      } else {
+        const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+        await chrome.tabGroups.update(groupId, { title: name, color }).catch(() => {});
+      }
+    } catch {}
+  }
+  // Return the fresh tab object so the response reflects where the tab really
+  // is (some Chrome builds move an API-created tab to the focused window).
+  return chrome.tabs.get(tab.id);
 }
 
 // Mark a tab Pilot is driving so it is obvious on screen: a colored group
 // with the configured name. Only groups tabs Pilot owns (created here);
-// never the user's active tab, because targetTab never returns that.
+// never the user's active tab, because targetTab never returns that. Skips
+// tabs in background windows — grouping those would yank them into the
+// focused window (see createHarnessTab).
 async function ensureGrouped(tab) {
   if (tab.groupId !== -1) return tab.groupId;
+  const win = await chrome.windows.get(tab.windowId).catch(() => null);
+  if (!win || !win.focused) return -1;
   const name = settings.groupName || "Harness";
   const color = settings.groupColor || "red";
   try {

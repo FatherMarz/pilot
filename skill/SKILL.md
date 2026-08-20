@@ -36,13 +36,18 @@ Chrome profiles also work:
 
 ```sh
 node cli.js '{"action":"snap"}' --session "$DSH_SESSION_ID"                  # same window
-node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --new-window    # own window
+node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --here          # the window Marcello is looking at
 node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --window 123    # given window
+node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --new-window    # own window
 node cli.js '{"action":"snap"}' --session "$DSH_SESSION_ID" --profile work   # other profile
 node cli.js '{"action":"release"}' --session "$DSH_SESSION_ID"   # close your tab when done
 node cli.js '{"action":"guard"}' --session "$DSH_SESSION_ID"     # pull the tab back if it drifted
 node cli.js --sessions                                           # see every agent's pin
 ```
+
+A claimed tab stays in the window it was claimed in — even when Marcello flips
+between windows — so `--here` is how you pin yourself to the window he points
+at, and `--window`/`--new-window` pin you to a specific or brand-new window.
 
 Never omit `--session`: without it every agent shares the "default" pin and you
 can collide with another driver.
