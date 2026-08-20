@@ -32,7 +32,8 @@
     .head .sub { font-size: 10.5px; color: #8891a0; margin: 1px 0 0; }
 
     .status-row {
-      display: flex; align-items: center; gap: 8px;
+      position: relative;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
       margin: 0 16px 10px;
       padding: 9px 12px;
       border: 1px solid rgba(15, 20, 25, 0.1);
@@ -50,7 +51,8 @@
     @keyframes pulse { 50% { opacity: 0.35; } }
     .status-row .label { font-weight: 500; }
     .chip {
-      margin-left: auto;
+      position: absolute; right: 10px; top: 50%;
+      transform: translateY(-50%);
       padding: 2px 8px;
       border-radius: 999px;
       font-size: 10px;
@@ -111,7 +113,7 @@
   <div id="status" class="status-row disconnected">
     <span class="dot"></span>
     <span class="label" id="label">Disconnected</span>
-    <span class="detail" id="groupBadge"></span>
+    <span class="chip" id="groupBadge"></span>
   </div>
 
   <div class="meta">
