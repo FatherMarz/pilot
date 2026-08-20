@@ -11,7 +11,7 @@ the page. It works on **background tabs** — you do not need to steal Marcello'
 
 ## Before you start (the handshake)
 
-1. Relay must be running: `node server.js` (in `~/Documents/Development/custom-tools/chrome-bridge`).
+1. Relay must be running: `node server.js` (in `~/Documents/Development/custom-tools/pilot`).
    Check with `curl -s http://127.0.0.1:8756/` — it returns `{"server":"pilot","profiles":[...]}`.
 2. The extension must be connected per profile. Ask Marcello to click **Connect** in the
    Pilot popup of each Chrome profile he wants you to drive, and give each profile a
@@ -32,7 +32,7 @@ Marcello to click Connect in that profile's popup (once).
 ## The commands
 
 All commands go through the CLI. The CLI lives at:
-`~/Documents/Development/custom-tools/chrome-bridge/cli.js` — run it with `node cli.js '<json>'`.
+`~/Documents/Development/custom-tools/pilot/cli.js` — run it with `node cli.js '<json>'`.
 Add `--profile NAME` when the profile isn't the default. Add `--out FILE` to a `shot`
 to choose where the image lands.
 
@@ -88,7 +88,7 @@ can collide with another driver.
 Pilot ships with a local OCR binary built on macOS Vision:
 
 ```sh
-cd ~/Documents/Development/custom-tools/chrome-bridge
+cd ~/Documents/Development/custom-tools/pilot
 node cli.js '{"action":"shot"}' --out /tmp/page.jpg   # writes the image
 ./ocr /tmp/page.jpg                                   # text lines
 ./ocr /tmp/page.jpg --json                            # boxes + confidence
