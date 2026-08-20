@@ -32,7 +32,6 @@
     .head .sub { font-size: 10.5px; color: #8891a0; margin: 1px 0 0; }
 
     .status-row {
-      position: relative;
       display: flex; align-items: center; justify-content: center; gap: 8px;
       margin: 0 16px 10px;
       padding: 9px 12px;
@@ -50,21 +49,6 @@
     .disconnected .dot { background: #e74c3c; box-shadow: 0 0 0 3px rgba(231, 76, 60, 0.15); }
     @keyframes pulse { 50% { opacity: 0.35; } }
     .status-row .label { font-weight: 500; }
-    .chip {
-      position: absolute; right: 10px; top: 50%;
-      transform: translateY(-50%);
-      padding: 2px 8px;
-      border-radius: 999px;
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.03em;
-      color: #fff;
-      background: #8891a0;
-      white-space: nowrap;
-      max-width: 110px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
 
     .meta {
       margin: 0 16px 10px;
@@ -113,7 +97,6 @@
   <div id="status" class="status-row disconnected">
     <span class="dot"></span>
     <span class="label" id="label">Disconnected</span>
-    <span class="chip" id="groupBadge"></span>
   </div>
 
   <div class="meta">

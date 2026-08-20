@@ -7,7 +7,6 @@ const hint = document.getElementById("hint");
 const profileEl = document.getElementById("profile");
 const groupNameEl = document.getElementById("groupName");
 const relayEl = document.getElementById("relay");
-const groupBadge = document.getElementById("groupBadge");
 
 function render(state) {
   if (typeof state === "string") state = { connected: state === "connected", intent: state === "connecting" };
@@ -22,10 +21,7 @@ function render(state) {
   disconnectBtn.hidden = !state.connected;
   hint.hidden = state.connected || state.intent;
   if (state.profile) profileEl.textContent = state.profile;
-  if (state.groupName) {
-    groupNameEl.textContent = state.groupName;
-    groupBadge.textContent = state.groupName;
-  }
+  if (state.groupName) groupNameEl.textContent = state.groupName;
   if (state.relay) relayEl.textContent = state.relay;
 }
 
