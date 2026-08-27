@@ -183,6 +183,7 @@ const HELP = {
     key: `{"action":"key","key":"Enter"} — add "meta":true or "shift":true`,
     form: `{"action":"form"} — every input/select/radio plus visible error text`,
     findText: `{"action":"findText","text":"Total"} — where text sits on the page`,
+    read: `{"action":"read"} — full page text (12000 chars); {"offset":12000} continues`,
     dialog: `{"action":"dialog"} — text of the open dialog, null if none`,
     navigate: `{"action":"navigate","url":"https://example.com"} — waits for the page to load`,
     shot: `{"action":"shot"} — screenshot to ~/.pilot/shots; add --out FILE; read it with ./ocr FILE`,

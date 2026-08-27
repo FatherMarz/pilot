@@ -120,6 +120,12 @@ function actFunc(mode, a, b, c, d) {
     "button, a, input, textarea, select, [role=button], [role=checkbox], [role=link], [role=tab], [onclick], label, span, div, li")];
   const labelOf = (el) =>
     (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.title || "").trim();
+  // For a radio/checkbox (or its label), the checked state after a click —
+  // lets the model confirm a toggle from the click result alone.
+  const checkedOf = (el) => {
+    const input = el.tagName === "INPUT" ? el : (el.control || (el.querySelector && el.querySelector("input")) || null);
+    return input && (input.type === "radio" || input.type === "checkbox") ? input.checked : undefined;
+  };
   const visibleTexts = () => {
     const seen = new Set();
     const out = [];
@@ -151,6 +157,12 @@ function actFunc(mode, a, b, c, d) {
   if (mode === "tail") {
     const text = (document.body && document.body.innerText || "");
     return text.slice(-3000);
+  }
+  if (mode === "read") {
+    // Long-form page text for read-heavy tasks; snap caps at 3000 chars.
+    const text = (document.body && document.body.innerText || "");
+    const offset = Number(a) || 0;
+    return { ok: true, length: text.length, offset, text: text.slice(offset, offset + 12000) };
   }
   if (mode === "key") {
     const target = document.activeElement || document.body;
@@ -208,7 +220,8 @@ function actFunc(mode, a, b, c, d) {
     }
     const p = pointAt(best.el);
     fireClick(best.el, p.x, p.y);
-    return { ok: true, clicked: labelOf(best.el).slice(0, 50), tag: best.el.tagName.toLowerCase(), x: p.x, y: p.y, match: ["exact", "exact-ci", "starts", "starts-ci", "contains-ci"][best.score[0]] };
+    const chk = checkedOf(best.el);
+    return { ok: true, clicked: labelOf(best.el).slice(0, 50), tag: best.el.tagName.toLowerCase(), x: p.x, y: p.y, match: ["exact", "exact-ci", "starts", "starts-ci", "contains-ci"][best.score[0]], ...(chk !== undefined ? { checkedNow: chk } : {}) };
   }
   if (mode === "clickN") {
     // Click item N from the most recent snap: SAME collector, SAME order.
@@ -225,7 +238,8 @@ function actFunc(mode, a, b, c, d) {
     if (!item) return { ok: false, error: "no item " + a + " (snap listed " + items.length + " items)", hint: "snap again — the page changed" };
     const p = pointAt(item.el);
     fireClick(item.el, p.x, p.y);
-    return { ok: true, clicked: item.text || item.icon, n: a, x: p.x, y: p.y };
+    const chk = checkedOf(item.el);
+    return { ok: true, clicked: item.text || item.icon, n: a, x: p.x, y: p.y, ...(chk !== undefined ? { checkedNow: chk } : {}) };
   }
   if (mode === "type" || mode === "replace") {
     const all = [...document.querySelectorAll('[contenteditable="true"], textarea, input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])')];
@@ -259,6 +273,7 @@ function snapFunc() {
   out.items = [...document.querySelectorAll("button, a, input, textarea, select, [role=dialog], [role=checkbox], label")]
     .map((el) => {
       const r = el.getBoundingClientRect();
+      const isToggle = el.tagName === "INPUT" && (el.type === "radio" || el.type === "checkbox");
       return {
         tag: el.tagName.toLowerCase(),
         text: (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.title || "").trim().slice(0, 70),
@@ -267,6 +282,7 @@ function snapFunc() {
         x: Math.round(r.x + r.width / 2),
         y: Math.round(r.y + r.height / 2),
         w: Math.round(r.width),
+        ...(isToggle ? { type: el.type, checked: el.checked } : {}),
       };
     })
     .filter((i) => i.visible && (i.text || i.icon))
@@ -527,6 +543,7 @@ async function dispatchAction(msg, reply) {
     case "clickXY": return await run(actFunc, ["clickXY", Number(msg.x), Number(msg.y), null, settings.visualFeedback]);
     case "key": return await run(actFunc, ["key", String(msg.key || ""), Boolean(msg.meta), Boolean(msg.shift), settings.visualFeedback]);
     case "tail": return await run(actFunc, ["tail", null, null, null, settings.visualFeedback]);
+    case "read": return await run(actFunc, ["read", Number(msg.offset) || 0, null, null, settings.visualFeedback]);
     case "hrefs": return await run(actFunc, ["hrefs", String(msg.text || ""), null, null, settings.visualFeedback]);
     case "clickText": return await run(actFunc, ["clickText", String(msg.text || ""), null, Boolean(msg.exact), settings.visualFeedback]);
     case "clickN": return await run(actFunc, ["clickN", Number(msg.n), null, null, settings.visualFeedback]);

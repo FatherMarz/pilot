@@ -68,6 +68,7 @@ Every reply is JSON with an `ok` field.
 | Inspect form fields | `{"action":"form"}` — inputs, selects, radios, visible error text |
 | Open dialog text | `{"action":"dialog"}` |
 | Find text position | `{"action":"findText","text":"Total"}` |
+| Read a long page | `{"action":"read"}` — 12000 chars of page text; `"offset":12000` continues |
 | Navigate (waits for load) | `{"action":"navigate","url":"https://example.com"}` — returns `loaded:false` if >15s |
 | List tabs | `{"action":"tabs"}` |
 | Screenshot | `{"action":"shot"}` (to `~/.pilot/shots/`; `--out FILE` to choose) |
@@ -112,3 +113,18 @@ For plain text content, `snap` (`.text`) is cheaper than a screenshot.
 - Screenshot empty/black → the tab may be discarded; `navigate` first to wake it.
 - Clicks land but nothing happens → the page may use a dialog or a shadow DOM;
   try `dialog`, `form`, or `fillShadow`.
+
+## Handing Pilot to a small model
+
+`eval/prompt.md` is a battle-tested per-turn instruction block for small models
+(one JSON action per turn, no prose). `eval/drive.mjs` runs a task end to end
+with any OpenRouter model:
+
+```sh
+node eval/drive.mjs "Order a medium pizza with bacon on https://httpbin.org/forms/post ..."
+```
+
+GLM 5.3 Flash completes form-fill and search-and-extract tasks in ~13 steps
+with that prompt. Key details that made it work: numbered snap items, checked
+state on toggles, `checkedNow` in click results, and recovery hints on every
+failure.
