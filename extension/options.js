@@ -2,6 +2,7 @@ const DEFAULTS = {
   profileName: "default",
   relayUrl: "ws://127.0.0.1:8756",
   harnessUrl: "http://127.0.0.1:3080",
+  autoConnect: true,
   autoStartRelay: true,
   groupName: "Harness",
   groupColor: "red",
@@ -17,6 +18,7 @@ function load() {
     document.getElementById("profileName").value = s.profileName;
     document.getElementById("relayUrl").value = s.relayUrl;
     document.getElementById("harnessUrl").value = s.harnessUrl;
+    document.getElementById("autoConnect").checked = s.autoConnect !== false;
     document.getElementById("autoStartRelay").checked = !!s.autoStartRelay;
     document.getElementById("groupName").value = s.groupName;
     document.getElementById("groupColor").value = s.groupColor;
@@ -33,6 +35,7 @@ function save() {
     profileName: document.getElementById("profileName").value.trim() || "default",
     relayUrl: document.getElementById("relayUrl").value.trim() || DEFAULTS.relayUrl,
     harnessUrl: document.getElementById("harnessUrl").value.trim() || DEFAULTS.harnessUrl,
+    autoConnect: document.getElementById("autoConnect").checked,
     autoStartRelay: document.getElementById("autoStartRelay").checked,
     groupName: document.getElementById("groupName").value.trim() || "Harness",
     groupColor: document.getElementById("groupColor").value,

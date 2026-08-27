@@ -1,6 +1,6 @@
 ---
 name: pilot
-description: "Drive Marcello's Chrome browser from the harness via the Pilot bridge — clicks, keys, typing, form fills, tab management, and small screenshots (read locally with OCR, no vision API key needed). Use when Marcello asks you to do something in the browser (a web app, a form, a marketplace page), when you need to see or interact with a page, or when a task mentions Pilot, chrome-bridge, or driving Chrome. Requires the Pilot relay running (node server.js), the Pilot extension loaded in Chrome, and Connect clicked in the popup (that handshake is deliberate)."
+description: "Drive Marcello's Chrome browser from the harness via the Pilot bridge — clicks, keys, typing, form fills, tab management, and small screenshots (read locally with OCR, no vision API key needed). Use when Marcello asks you to do something in the browser (a web app, a form, a marketplace page), when you need to see or interact with a page, or when a task mentions Pilot or driving Chrome. Requires the Pilot relay (starts with the harness) and the Pilot extension in Chrome (auto-connects)."
 ---
 
 # /pilot — Drive Chrome from the harness
@@ -9,126 +9,106 @@ Pilot is a local bridge: a Chrome extension + a relay + a CLI. You command the C
 the relay routes to the connected Chrome profile, the extension clicks/types/snapshots
 the page. It works on **background tabs** — you do not need to steal Marcello's window.
 
-**Scope: browsers only.** Pilot drives Chrome tabs and nothing else. If the task
-targets anything outside a browser — a native app, the desktop, Finder, a system
-dialog, the menu bar — use the **computer-use** skill instead. Never use pilot
-for non-browser work.
+Everything lives at `~/Documents/Development/custom-tools/pilot`. Run commands from there.
 
-**Prefer the driver.** When the `browser_driver` tool is available, delegate the
-control loop to it: it runs on a browser-capable model. Call `browser_driver` with
-the task in plain words; it loads this skill itself, drives the CLI, and reports
-back. Fall back to driving the CLI directly only if `browser_driver` is unavailable.
-
-**Read-only first.** For reading a public page, docs, or any static content,
-prefer `web_search`/WebFetch — no browser needed. Use Pilot when the task must
-interact with a live page: fill a form, click, type, or drive a logged-in app.
-
-## Before you start (the handshake)
-
-1. Relay must be running: `node server.js` (in `~/Documents/Development/custom-tools/pilot`).
-   Check with `curl -s http://127.0.0.1:8756/` — it returns `{"server":"pilot","profiles":[...]}`.
-2. The extension must be connected per profile. Ask Marcello to click **Connect** in the
-   Pilot popup of each Chrome profile he wants you to drive, and give each profile a
-   distinct name in the Pilot options page. **Do not ask twice.** If it is already
-   connected, just proceed.
-3. Use `node cli.js --status` to see which profile(s) are connected and their names.
-
-## Pick a profile — `/bridge <profile>`
-
-`/bridge <profile>` points you at a connected Chrome profile: it claims your
-dedicated tab in that profile's shared agent-window (the first agent in the
-profile creates the window; later agents add their own tab to it) and pins the
-profile, so every later Pilot command in this session targets it automatically —
-no `--profile` flags needed. Run `/bridge` alone for status: connected profiles,
-and your tab pin. If the profile isn't connected, the claim reports it — ask
-Marcello to click Connect in that profile's popup (once).
-
-## The commands
-
-All commands go through the CLI. The CLI lives at:
-`~/Documents/Development/custom-tools/pilot/cli.js` — run it with `node cli.js '<json>'`.
-Add `--profile NAME` when the profile isn't the default. Add `--out FILE` to a `shot`
-to choose where the image lands.
-
-### One tab per agent — own window per profile
-
-Every command takes `--session "$DSH_SESSION_ID"`. That is your unique agent id.
-The first command with a new session claims a dedicated tab in its **own new
-window** of the target profile and pins it on disk; every later command drives
-that same tab. Your tab is yours — another agent with a different session id
-gets its own tab and can never hijack yours. The profile is the boundary:
-`--profile NAME` picks which connected Chrome profile you work in, and you get
-a fresh window there. Opt in to sharing Marcello's windows with `--here`
-(the window focused right now) or `--window ID`:
-
-```sh
-node cli.js '{"action":"snap"}' --session "$DSH_SESSION_ID"                  # own window, this profile
-node cli.js '{"action":"snap"}' --session "$DSH_SESSION_ID" --profile work   # own window, profile "work"
-node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --here          # share the window Marcello is looking at
-node cli.js '{"action":"claim"}' --session "$DSH_SESSION_ID" --window 123    # share a given window
-node cli.js '{"action":"release"}' --session "$DSH_SESSION_ID"   # close your tab when done
-node cli.js '{"action":"guard"}' --session "$DSH_SESSION_ID"     # pull the tab back if it drifted
-node cli.js --sessions                                           # see every agent's pin
-```
-
-A claimed tab stays in the window it was claimed in — even when Marcello flips
-between windows — so agents work in their own windows and never disturb his.
-
-Never omit `--session`: without it every agent shares the "default" pin and you
-can collide with another driver.
-
-| Goal | Command |
-| --- | --- |
-| What's on the page | `node cli.js '{"action":"snap"}'` — title, url, page text, clickable items with coordinates |
-| Claim your dedicated tab | `node cli.js '{"action":"claim"}'` (auto-claimed on your first command) |
-| Close your tab when done | `node cli.js '{"action":"release"}'` |
-| Click by text | `node cli.js '{"action":"clickText","text":"Save"}'` (add `"exact":true` for exact match) |
-| Click by CSS selector | `node cli.js '{"action":"click","sel":"button.submit"}'` |
-| Click by coordinates | `node cli.js '{"action":"clickXY","x":300,"y":500}'` |
-| Type into focused field | `node cli.js '{"action":"type","text":"hello"}'` |
-| Type into a field | `node cli.js '{"action":"type","sel":"#message","text":"hi"}'` |
-| Replace field content | `node cli.js '{"action":"replace","sel":"#name","text":"Ada"}'` |
-| Set input/select value | `node cli.js '{"action":"fill","sel":"#country","value":"CA"}'` |
-| Press a key | `node cli.js '{"action":"key","key":"Enter"}'` (meta: `"meta":true`, shift: `"shift":true`) |
-| Open dialog text | `node cli.js '{"action":"dialog"}'` |
-| Inspect form fields | `node cli.js '{"action":"form"}'` — inputs, selects, radios, error text |
-| Find text position | `node cli.js '{"action":"findText","text":"Save"}'` |
-| Navigate | `node cli.js '{"action":"navigate","url":"https://example.com"}'` |
-| List tabs | `node cli.js '{"action":"tabs"}'` |
-| Small screenshot | `node cli.js '{"action":"shot"}'` (saved to `~/.pilot/shots/`, path printed) |
-
-## Reading screenshots — no API key needed
-
-Pilot ships with a local OCR binary built on macOS Vision:
+## The golden loop (do this, in this order)
 
 ```sh
 cd ~/Documents/Development/custom-tools/pilot
-node cli.js '{"action":"shot"}' --out /tmp/page.jpg   # writes the image
-./ocr /tmp/page.jpg                                   # text lines
-./ocr /tmp/page.jpg --json                            # boxes + confidence
+node cli.js '{"action":"claim"}' --session myjob        # 1. pin a tab, ONCE
+node cli.js '{"action":"navigate","url":"https://..."}' --session myjob   # waits for load
+node cli.js '{"action":"snap"}' --session myjob         # 2. LOOK: numbered items
+node cli.js '{"action":"clickN","n":4}' --session myjob # 3. ACT: click item 4 from the snap
+node cli.js '{"action":"snap"}' --session myjob         # 4. CONFIRM it worked
 ```
 
-This works even when the OpenRouter/vision key is broken. Prefer OCR for reading
-screenshot text; only use a vision model when you need visual layout (colors, images).
-To actually look at a screenshot (layout, colors, images), open the printed path
-with `read_image`; `ocr` covers text with no vision key.
+Look before you click. Snap, act, snap again. One action at a time.
+`clickN` (click by snap item number) is the most reliable click — no selector, no
+text-matching, no coordinates. When in doubt: `node cli.js '{"action":"help"}'`
+prints every command with an example (works even with the relay down).
 
-## Workflow guidance
+## Reading replies
 
-- **Look before you click.** `snap` first, then act on what you saw.
-- **One action at a time.** Click, then `snap`/`dialog` to confirm the result.
-- **Background tabs are fine.** Pilot doesn't steal focus by default. If Marcello
-  explicitly wants to watch, mention that he can enable "Bring the driven tab
-  forward" in the Pilot options.
-- **Queued commands.** If a profile isn't connected, the relay queues the command
-  and the CLI exits with `"queued": true`. That means: the profile isn't connected —
-  ask Marcello to click Connect (once), or pick the right profile.
-- **Form fills:** use `form` to see the fields, `fill`/`type` to set them, and
-  `dialog` to read validation errors.
+Every reply is JSON with an `ok` field.
+- `ok: true` → the action happened; the reply says what it hit (`clicked`, `valueNow`, ...).
+- `ok: false` → read `error` and `hint`. Failures include recovery data: a failed
+  click returns `visibleTexts` (what you CAN click), a failed fill returns `fields`
+  (what exists), a failed select fill returns `options`. Use that data — do not retry
+  the same command blind.
+
+## Before you start (the handshake)
+
+1. Relay: `curl -s http://127.0.0.1:8756/` → `{"server":"pilot","profiles":[...]}`.
+   It starts with the harness; if it is down, run `node server.js` in the pilot dir
+   (background it).
+2. If `profiles` is empty the extension is not connected. It auto-connects on browser
+   start, so normally it is already there. If it is genuinely absent, ask Marcello ONCE
+   to click **Connect** in the Pilot popup. **Do not ask twice.**
+3. `node cli.js --status` shows the connected profile names. Target one with
+   `--profile NAME` (default is `default`).
+
+## The commands
+
+`node cli.js '<json>' --session NAME`. Single-quote the JSON, double-quote the keys.
+
+| Goal | Command |
+| --- | --- |
+| Help (full list + examples) | `{"action":"help"}` |
+| See the page | `{"action":"snap"}` — title, url, text, **numbered** clickable items |
+| Click snap item N | `{"action":"clickN","n":3}` — the reliable default |
+| Click by text | `{"action":"clickText","text":"Save"}` — forgiving (case, partial); `"exact":true` to pin |
+| Click by CSS selector | `{"action":"click","sel":"button.submit"}` |
+| Click by coordinates | `{"action":"clickXY","x":300,"y":500}` — use x/y from snap |
+| Type into the visible field | `{"action":"type","text":"hello"}` — sets the field to the text |
+| Type into a specific field | `{"action":"type","sel":"#message","text":"hi"}` |
+| Replace field content | `{"action":"replace","sel":"#name","text":"Ada"}` |
+| Set input/select value | `{"action":"fill","sel":"[name=size]","value":"medium"}` — selects also match by option label |
+| Fill a shadow-DOM field | `{"action":"fillShadow","match":"email","value":"a@b.c"}` — `match` is a substring of the field's name/placeholder/aria-label |
+| Press a key | `{"action":"key","key":"Enter"}` (`"meta":true`, `"shift":true`) |
+| Inspect form fields | `{"action":"form"}` — inputs, selects, radios, visible error text |
+| Open dialog text | `{"action":"dialog"}` |
+| Find text position | `{"action":"findText","text":"Total"}` |
+| Navigate (waits for load) | `{"action":"navigate","url":"https://example.com"}` — returns `loaded:false` if >15s |
+| List tabs | `{"action":"tabs"}` |
+| Screenshot | `{"action":"shot"}` (to `~/.pilot/shots/`; `--out FILE` to choose) |
+
+## Sessions — pin your own tab so nothing hijacks it
+
+**Always drive through a session.** `claim` once, then put `--session NAME` on every
+command. The pin survives across CLI invocations (`~/.pilot/session.json`).
+
+```sh
+node cli.js '{"action":"claim"}' --session NAME   # get/claim a dedicated tab
+node cli.js '{"action":"guard"}' --session NAME   # tab drifted? pull it back
+node cli.js '{"action":"release"}' --session NAME # close the tab and forget it
+node cli.js --sessions                            # list every session's pinned tab
+```
+
+- Different `--session` per task (e.g. `chatgpt`, `checkout`) — two jobs never collide.
+- `--tab ID` drives one specific tab for a single command without touching the pin.
+- Same window, different tabs: separate sessions. Different windows: `claim --new-window`.
+  Different Chrome profiles: `--profile work` vs `--profile personal`.
+- Hard limit: one debugger per tab (Chrome's rule). Two agents must not drive the
+  SAME tab at once; own sessions → no contention.
+
+## Reading screenshots — no API key needed
+
+```sh
+node cli.js '{"action":"shot"}' --out /tmp/page.jpg --session myjob
+./ocr /tmp/page.jpg          # text lines (macOS Vision, local)
+./ocr /tmp/page.jpg --json   # boxes + confidence
+```
+
+Prefer OCR for reading screenshot text; use a vision model only for visual layout.
+For plain text content, `snap` (`.text`) is cheaper than a screenshot.
 
 ## Troubleshooting
 
-- `timeout — is the relay running?` → start it: `node server.js`.
-- `"error":"queued"` → that profile isn't connected. Check `--status`, pick the right profile.
-- Screenshot empty/black → the tab may be discarded; `navigate` or `tabs` first to wake it.
-- Bad JSON → single-quote the command in the shell and double-quote the keys.
+- `timeout — is the relay running?` → start it: `node server.js` (in the pilot dir).
+- `"queued": true` → that profile is not connected. Check `--status`; if genuinely
+  disconnected, ask Marcello once to click Connect in the popup.
+- `unknown action` → the extension is running old code. Send `{"action":"reload"}`,
+  wait 3s; it auto-reconnects with the new code.
+- Screenshot empty/black → the tab may be discarded; `navigate` first to wake it.
+- Clicks land but nothing happens → the page may use a dialog or a shadow DOM;
+  try `dialog`, `form`, or `fillShadow`.

@@ -158,11 +158,49 @@ async function claimTab(opts) {
 // Actions that never touch a tab (mirrors the extension's METADATA_ACTIONS plus
 // our own CLI-level convenience actions). They must not claim or create a tab.
 const NON_TAB_ACTIONS = new Set([
-  "ping", "status", "tabs", "windows", "groups", "activeTab",
-  "harnessTab", "newHarnessTab", "reload", "claim", "release", "guard",
+  "ping", "status", "tabs", "windows", "groups", "activeTab", "tabInfo", "closeTab",
+  "harnessTab", "newHarnessTab", "reload", "claim", "release", "guard", "help",
 ]);
 
+// One screen, everything a driving model needs. Kept in the CLI so it works
+// even when the relay or the extension is down.
+const HELP = {
+  start: [
+    `claim a tab once:   node cli.js '{"action":"claim"}' --session myjob`,
+    `then reuse it:      add --session myjob to every command`,
+    `look before you click: snap first, act second, snap again to confirm`,
+  ],
+  commands: {
+    snap: `{"action":"snap"} — title, url, page text, numbered clickable items`,
+    clickN: `{"action":"clickN","n":3} — click item 3 from the last snap (most reliable)`,
+    clickText: `{"action":"clickText","text":"Save"} — forgiving match; add "exact":true to pin it`,
+    click: `{"action":"click","sel":"button.submit"} — CSS selector`,
+    clickXY: `{"action":"clickXY","x":300,"y":500} — viewport coordinates from snap`,
+    type: `{"action":"type","text":"hello"} — into the visible field; add "sel" to pick one`,
+    replace: `{"action":"replace","sel":"#name","text":"Ada"} — clear the field, then type`,
+    fill: `{"action":"fill","sel":"[name=size]","value":"medium"} — set input/select value`,
+    fillShadow: `{"action":"fillShadow","match":"email","value":"a@b.c"} — reach fields inside shadow DOM`,
+    key: `{"action":"key","key":"Enter"} — add "meta":true or "shift":true`,
+    form: `{"action":"form"} — every input/select/radio plus visible error text`,
+    findText: `{"action":"findText","text":"Total"} — where text sits on the page`,
+    dialog: `{"action":"dialog"} — text of the open dialog, null if none`,
+    navigate: `{"action":"navigate","url":"https://example.com"} — waits for the page to load`,
+    shot: `{"action":"shot"} — screenshot to ~/.pilot/shots; add --out FILE; read it with ./ocr FILE`,
+    tabs: `{"action":"tabs"} — every open tab with ids`,
+    claim: `{"action":"claim"} --session NAME — pin a dedicated tab`,
+    guard: `{"action":"guard"} --session NAME — pull the tab back if it drifted`,
+    release: `{"action":"release"} --session NAME — close the tab and forget it`,
+  },
+  flags: `--session NAME (always) | --profile NAME | --tab ID | --out FILE | --status | --sessions`,
+  errors: `every reply has "ok". On ok:false read "error" and "hint"; most failures include the visible texts or fields to try next.`,
+};
+
 async function run(cmd, opts) {
+  if (cmd && cmd.action === "help") {
+    console.log(JSON.stringify(HELP, null, 1));
+    return;
+  }
+
   if (opts.status) {
     const status = await request({ action: "status" }, opts);
     console.log(JSON.stringify(status, null, 1));
@@ -326,10 +364,25 @@ function request(cmd, opts) {
   if (opts.status) return run(null, opts);
   if (opts.sessions) return run(null, opts);
   if (!opts.json) {
-    console.error("usage: node cli.js '<json command>' [--profile NAME] [--session NAME] [--tab ID] [--window ID | --here | --new-window] [--out FILE] | --status | --sessions");    process.exit(1);
+    console.error("usage: node cli.js '<json command>' [--profile NAME] [--session NAME] [--tab ID] [--window ID | --here | --new-window] [--out FILE] | --status | --sessions");
+    console.error(`try: node cli.js '{"action":"help"}'`);
+    process.exit(1);
   }
   let cmd;
-  try { cmd = JSON.parse(opts.json); } catch { console.error("bad JSON:", opts.json); process.exit(1); }
+  try {
+    cmd = JSON.parse(opts.json);
+  } catch {
+    console.error(JSON.stringify({
+      ok: false,
+      error: "bad JSON: " + opts.json,
+      hint: `single-quote the whole command, double-quote the keys. Example: node cli.js '{"action":"snap"}' --session myjob`,
+    }, null, 1));
+    process.exit(1);
+  }
+  if (!cmd || typeof cmd !== "object" || !cmd.action) {
+    console.error(JSON.stringify({ ok: false, error: "command needs an \"action\" key", hint: `node cli.js '{"action":"help"}'` }, null, 1));
+    process.exit(1);
+  }
   return run(cmd, opts);
 })().catch((e) => {
   console.error(JSON.stringify({ ok: false, error: String(e && e.message || e) }));
