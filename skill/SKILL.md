@@ -24,9 +24,11 @@ node cli.js '{"action":"snap"}' --session myjob         # 4. CONFIRM it worked
 
 Clicks and keys are TRUSTED input: Pilot resolves the element, then clicks it
 through the Chrome debugger, so pages see `event.isTrusted === true` — same as
-a human click (and same as Claude in Chrome). If the debugger is busy or the
-element is covered, it falls back to simulated events automatically; the reply's
-`via` field says which path ran (`cdp`, `synthetic-covered`, `synthetic-fallback`).
+a human click (and same as Claude in Chrome). Pilot NEVER disturbs the user: if the target
+tab sits in the window Marcello is working in, it stays a background tab and
+gets simulated events instead (those work fine unfocused). The reply's `via`
+field says which path ran (`cdp`, `synthetic-background`, `synthetic-covered`,
+`synthetic-fallback`).
 
 Look before you click. Snap, act, snap again. One action at a time.
 `clickN` (click by snap item number) is the most reliable click — no selector, no

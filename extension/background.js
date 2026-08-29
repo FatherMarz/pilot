@@ -895,12 +895,20 @@ async function dispatchAction(msg, reply) {
   };
 
   // A non-active tab never processes debugger input — the renderer is parked.
-  // Make ours the active tab of ITS OWN window (usually the dedicated agent
-  // window). The window itself stays in the background; user focus is
-  // untouched — that needs windows.update({focused}), which we don't do.
-  const ensureRendered = async () => {
+  // Trusted input therefore needs our tab to be the active one in ITS OWN
+  // window. Rule: never disturb the user. If the tab's window is the FOCUSED
+  // window (the user is working right there), we do NOT switch tabs — the
+  // caller falls back to synthetic events, which work fine on background
+  // tabs. In an unfocused window (the usual dedicated agent window) we
+  // activate our tab; user focus is untouched — that would need
+  // windows.update({focused}), which we never call.
+  const canRenderTrusted = async () => {
     const [active] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
-    if (!active || active.id !== tab.id) await chrome.tabs.update(tab.id, { active: true });
+    if (active && active.id === tab.id) return true;
+    const win = await chrome.windows.get(tab.windowId);
+    if (win.focused) return false;
+    await chrome.tabs.update(tab.id, { active: true });
+    return true;
   };
 
   // Element clicks: resolve the element, then click it with a REAL debugger
@@ -908,7 +916,12 @@ async function dispatchAction(msg, reply) {
   // element is covered, the debugger is taken, or trustedInput is off.
   const trustedClick = async (mode, arg, exact) => {
     if (!settings.trustedInput) return await run(actFunc, [mode, arg, null, exact, settings.visualFeedback]);
-    await ensureRendered().catch(() => {});
+    const cdpOk = await canRenderTrusted().catch(() => false);
+    if (!cdpOk) {
+      const r = await run(actFunc, [mode, arg, null, exact, settings.visualFeedback]);
+      if (r && typeof r === "object" && r.ok) r.via = "synthetic-background";
+      return r;
+    }
     const loc = await run(locateFunc, [mode, arg, exact, settings.visualFeedback]);
     if (!loc || loc.needsCdp !== true) return loc; // final result (error or synthetic-covered)
     try {
@@ -931,9 +944,8 @@ async function dispatchAction(msg, reply) {
     case "clickText": return await trustedClick("clickText", String(msg.text || ""), Boolean(msg.exact));
     case "clickN": return await trustedClick("clickN", Number(msg.n), null);
     case "clickXY": {
-      if (settings.trustedInput) {
+      if (settings.trustedInput && await canRenderTrusted().catch(() => false)) {
         try {
-          await ensureRendered();
           await cdpClick(tab.id, Number(msg.x), Number(msg.y));
           return { ok: true, x: Number(msg.x), y: Number(msg.y), via: "cdp" };
         } catch { /* fall through to synthetic */ }
@@ -941,9 +953,8 @@ async function dispatchAction(msg, reply) {
       return await run(actFunc, ["clickXY", Number(msg.x), Number(msg.y), null, settings.visualFeedback]);
     }
     case "key": {
-      if (settings.trustedInput) {
+      if (settings.trustedInput && await canRenderTrusted().catch(() => false)) {
         try {
-          await ensureRendered();
           await cdpKey(tab.id, String(msg.key || ""), Boolean(msg.meta), Boolean(msg.shift));
           return { ok: true, key: String(msg.key || ""), via: "cdp" };
         } catch { /* fall through to synthetic */ }
@@ -953,11 +964,10 @@ async function dispatchAction(msg, reply) {
     case "typeKeys": {
       // Real per-character keystrokes from the debugger — what masked or
       // per-key-formatted fields (card numbers, OTP boxes) actually require.
-      if (settings.trustedInput) {
+      if (settings.trustedInput && await canRenderTrusted().catch(() => false)) {
         const focus = await run(focusFieldFunc, [String(msg.sel || "")]);
         if (!focus || focus.ok !== true) return focus;
         try {
-          await ensureRendered();
           await cdpTypeText(tab.id, String(msg.text || ""));
           let after = {};
           try { after = (await run(fieldValueFunc, [])) || {}; } catch { /* ignore */ }
