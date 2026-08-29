@@ -1,160 +1,158 @@
 # Pilot
 
 A local bridge so any agent harness can drive a Chrome profile — clicks, keys,
-typing, tab management, and small screenshots — without stealing your window.
+typing, form fills, tab management, and small screenshots — without stealing
+your window.
 
 Three pieces:
 
 | Piece | What it is |
 | --- | --- |
-| `extension/` | MV3 Chrome extension. The popup's **Connect** button is the handshake: a profile only appears on the relay after you click it. |
+| `extension/` | MV3 Chrome extension. Auto-connects to the relay on browser start; the popup shows the state and can disconnect. |
 | `server.js` | The relay. One relay serves every Chrome profile on the machine. `node server.js`. |
-| `cli.js` | Harness-side client. `node cli.js '{"action":"snap"}'`. |
+| `cli.js` | Harness-side client. `node cli.js '{"action":"snap"}'`. Run `node cli.js '{"action":"help"}'` for the full cheat sheet. |
 
 Plus `ocr.swift` — an on-device macOS Vision OCR tool (`swiftc -O ocr.swift -o ocr`)
-that reads screenshot text with **zero API keys**, which is how the harness reads
+that reads screenshot text with **zero API keys**, which is how a harness reads
 Pilot screenshots even when a vision provider key is unavailable.
 
-## Why a handshake
+## Trusted input
 
-The relay is localhost-only and has no passwords. The human is the password:
-you click **Connect** in the popup of whichever Chrome profile you want driven,
-and that profile shows up on the relay. Click **Disconnect** (or close Chrome)
-and it's gone. Nothing reconnects by itself.
+Clicks and keys go through the Chrome debugger (`Input.dispatch*`), so pages
+receive **real user input**: `event.isTrusted === true`, default actions run,
+same as a human click. Element targeting stays semantic — `clickN`/`clickText`
+resolve the element, scroll it into view, and the debugger clicks its center —
+so a shifted layout cannot make it miss.
 
-Use different Chrome profiles for different jobs — give each one a distinct
-profile name in the Pilot options page, and the harness targets the right one:
+Pilot never disturbs you. Debugger input needs the tab rendered (active in its
+window), so:
 
-```sh
-node cli.js '{"action":"click","text":"Deploy"}' --profile work
-node cli.js '{"action":"shot"}' --profile personal
-```
+- Tab in an **unfocused window** (the usual dedicated agent window) → Pilot
+  activates it there and clicks trusted. Your focus is untouched.
+- Tab in the **window you are working in** → it stays a background tab and
+  gets simulated events instead (those work fine unfocused).
+- Debugger taken, or element covered by an overlay → simulated events.
+
+Every reply's `via` field says which path ran: `cdp`, `synthetic-background`,
+`synthetic-covered`, or `synthetic-fallback`.
 
 ## Quick start
 
 ```sh
-# 1. Run the relay
-node server.js
-
-# 2. Load the extension (chrome://extensions → Developer mode → Load unpacked)
+# 1. Load the extension (chrome://extensions → Developer mode → Load unpacked)
 #    point it at the extension/ folder. Pin Pilot to the toolbar.
 
-# 3. Click Connect in the Pilot popup. That's the handshake.
+# 2. Run the relay (a harness normally starts it for you)
+node server.js
 
-# 4. Drive it from the CLI
+# 3. Drive it
 node cli.js --status
-node cli.js '{"action":"snap"}'
-node cli.js '{"action":"click","text":"Submit"}'
-node cli.js '{"action":"shot"}' --out /tmp/page.jpg
-./ocr /tmp/page.jpg
+node cli.js '{"action":"claim"}' --session myjob
+node cli.js '{"action":"navigate","url":"https://example.com"}' --session myjob
+node cli.js '{"action":"snap"}' --session myjob
+node cli.js '{"action":"clickN","n":3}' --session myjob
 ```
 
-## Background tabs, no focus stealing
+The extension connects on browser start (turn **Auto-connect** off in Options
+for a strictly manual popup handshake). After editing extension code, send
+`{"action":"reload"}` — Chrome does not reload unpacked extension code on
+browser restart.
 
-Pilot runs commands via `chrome.scripting.executeScript`, which works on
-inactive tabs — the harness can click, type, and snapshot a background tab
-while you work in another window. It only brings the driven tab forward if you
-enable **"Bring the driven tab forward on every action"** in the options page.
+## The loop a driving model follows
 
-Driven tabs get a red **Harness** tab group so it's obvious what the agent is
-touching. Screenshots of background tabs use the Chrome DevTools Protocol, so
-they work without focusing the tab.
+`snap` returns the page text plus a **numbered** list of clickable items;
+`clickN` clicks by that number; snap again confirms. No selectors, no
+coordinates, no exact spelling needed. Every reply has `ok`; failures carry
+recovery data — a failed click returns `visibleTexts`, a failed fill returns
+`fields`, a failed select fill returns `options`, toggles report `checkedNow`.
 
 ## CLI reference
 
 ```sh
-node cli.js --status                                  # who is connected
-node cli.js --sessions                                # every agent's tab pin (~/.pilot/session.json)
+node cli.js --status         # who is connected
+node cli.js --sessions       # every agent's tab pin (~/.pilot/session.json)
+node cli.js '{"action":"help"}'   # full command list with examples
 ```
 
-### Sessions — one tab per agent, own window per profile
+### Sessions — one tab per agent
 
-Every agent passes `--session NAME` (use your agent id, e.g. `$DSH_SESSION_ID`).
-The first command with a new session claims a dedicated tab in its **own new
-window** of the target profile and pins it on disk; later commands drive that
-same tab, so two agents can never hijack each other. The profile is the
-boundary — `--profile NAME` picks the connected Chrome profile, and the agent
-works in a fresh window there. Opt into sharing a window with `--here` (the
-one focused now) or `--window ID`. A claimed tab stays where it was claimed,
-even as focus flips between windows.
+Every agent passes `--session NAME`. The first command with a new session
+claims a dedicated tab (in a shared per-profile agent window) and pins it on
+disk; later commands drive that same tab, so two agents never hijack each
+other. `--profile NAME` picks the connected Chrome profile. `--new-window`
+forces a fresh window, `--here` shares the focused one, `--window ID` a
+specific one. `--tab ID` overrides the pin for one call.
 
 ```sh
-node cli.js '{"action":"claim"}' --session NAME                # own new window, this profile
-node cli.js '{"action":"claim"}' --session NAME --profile work # own new window, profile "work"
-node cli.js '{"action":"claim"}' --session NAME --here         # share the window focused now
-node cli.js '{"action":"release"}' --session NAME              # close the pinned tab, forget it
-node cli.js '{"action":"guard"}' --session NAME                # pull the tab back if it drifted
+node cli.js '{"action":"claim"}' --session NAME     # pin a dedicated tab
+node cli.js '{"action":"guard"}' --session NAME     # pull the tab back if it drifted
+node cli.js '{"action":"release"}' --session NAME   # close the pinned tab, forget it
 ```
 
-Every other command also takes `--session NAME` (default `default` — omit only
-when nothing else shares the profile). `--tab ID` overrides the pin for one call.
+One hard limit: Chrome allows one debugger per tab, so two agents must not
+drive the same tab at once — separate sessions never contend.
+
+### Actions
 
 ```sh
-node cli.js '{"action":"tabs"}'                                  # every tab: url, title, group, window, pinned, muted, active
-node cli.js '{"action":"windows"}'                    # every window: focused, type, state, size
-node cli.js '{"action":"groups"}'                     # every tab group: title, color, window, collapsed
-node cli.js '{"action":"activeTab"}'                  # what YOU are looking at right now (so the agent avoids it)
-node cli.js '{"action":"tabInfo","tabId":123}'        # one tab's details
+# See
+node cli.js '{"action":"snap"}'                      # title, url, text, numbered clickable items
+node cli.js '{"action":"read"}'                      # 12000 chars of page text; {"offset":12000} continues
+node cli.js '{"action":"form"}'                      # inputs/selects/radios + visible error text
+node cli.js '{"action":"dialog"}'                    # open dialog text
+node cli.js '{"action":"findText","text":"Total"}'   # where text sits on the page
+node cli.js '{"action":"hrefs","text":"docs"}'       # links matching text/href
+node cli.js '{"action":"shot"}'                      # screenshot → ~/.pilot/shots/ (or --out FILE)
 
-# Tab management — target the driven tab unless you pass tabId
-node cli.js '{"action":"newHarnessTab","url":"https://x"}'  # background tab in the Harness group
-node cli.js '{"action":"closeTab","tabId":123}'       # close a tab
-node cli.js '{"action":"duplicate","tabId":123}'      # duplicate a tab
-node cli.js '{"action":"pin","tabId":123}' / '{"action":"unpin","tabId":123}'
-node cli.js '{"action":"reloadTab","tabId":123}'      # reload a tab
+# Act
+node cli.js '{"action":"clickN","n":3}'              # click item 3 from the last snap
+node cli.js '{"action":"clickText","text":"Save"}'   # forgiving text match ("exact":true to pin)
+node cli.js '{"action":"click","sel":"button.x"}'    # CSS selector
+node cli.js '{"action":"clickXY","x":100,"y":200}'   # coordinates
+node cli.js '{"action":"type","sel":"#msg","text":"hi"}'      # set a field (framework-safe events)
+node cli.js '{"action":"replace","sel":"#name","text":"Ada"}' # clear then type
+node cli.js '{"action":"typeKeys","sel":"#card","text":"4242"}' # real per-char keystrokes (masked fields)
+node cli.js '{"action":"fill","sel":"[name=size]","value":"medium"}' # selects also match by option label
+node cli.js '{"action":"fillShadow","match":"email","value":"a@b.c"}' # fields inside shadow DOM
+node cli.js '{"action":"key","key":"Enter"}'         # "meta":true, "shift":true
 
-# Read a page — deep
-node cli.js '{"action":"snap"}'                       # quick snapshot (title, url, text, clickable items)
-node cli.js '{"action":"page"}'                       # deep: meta, headings, links, forms, images, text
-node cli.js '{"action":"eval","code":"document.title"}'      # run JS in the page, JSON-safe result
-node cli.js '{"action":"scroll","dy":800}'            # scroll; returns new position
-node cli.js '{"action":"inspect","x":100,"y":200}'    # what element is under a point (tag, text, rect, attrs)
-
-# Interact
-node cli.js '{"action":"click","sel":"button.x"}'     # click by CSS selector
-node cli.js '{"action":"clickText","text":"Save"}'    # click by visible text
-node cli.js '{"action":"clickXY","x":100,"y":200}'    # click at coordinates
-node cli.js '{"action":"type","text":"hello"}'        # type into the focused composer
-node cli.js '{"action":"type","sel":"#msg","text":"hi"}'
-node cli.js '{"action":"key","key":"Enter"}'
-node cli.js '{"action":"fill","sel":"#name","value":"Ada"}'
-node cli.js '{"action":"form"}'                       # inputs/selects/radios in the open dialog
-node cli.js '{"action":"dialog"}'                     # open dialog text
-node cli.js '{"action":"findText","text":"Save"}'     # locate text on the page
-node cli.js '{"action":"navigate","url":"https://x"}' # go to a URL
-node cli.js '{"action":"shot"}'                       # screenshot → saved to ~/.pilot/shots/
-node cli.js '{"action":"shot"}' --out /tmp/x.jpg
-node cli.js '{"action":"reload"}'                     # reload the extension
+# Tabs
+node cli.js '{"action":"navigate","url":"https://x"}'  # waits for the load (15s cap)
+node cli.js '{"action":"tabs"}'                        # every tab
+node cli.js '{"action":"windows"}'                     # every window
+node cli.js '{"action":"activeTab"}'                   # what YOU are looking at (agents avoid it)
+node cli.js '{"action":"tabInfo","tabId":123}'
+node cli.js '{"action":"closeTab","tabId":123}'
+node cli.js '{"action":"newHarnessTab","url":"https://x"}'
+node cli.js '{"action":"reload"}'                      # reload the extension itself
 ```
 
-### Tab targeting rules
-
-- **Via the CLI with `--session NAME`** (the normal path) → your pinned tab,
-  claimed on first use. Two agents with different session names drive different
-  tabs in the same window and never touch each other's (or yours).
-- **`--tab ID` or an inline `tabId`** → that exact tab, once.
-- **No session, no `tabId`** → Pilot drives a Harness-grouped background tab
-  (finds one or creates a fresh background tab). It **never** hijacks your
-  active tab.
-- Read-only actions (`tabs`, `windows`, `groups`, `activeTab`, `snap`, `page`,
-  `eval`, `scroll`, `inspect`, `shot`) never bring a tab forward, even with
-  "bring forward" enabled. Only real interactions (`click`, `type`, `key`,
-  `navigate`, …) do, and only when you opted in.
-
-Every command accepts `--profile NAME` to pick which Chrome profile handles it.
 Commands sent to a profile that isn't connected are queued on the relay and
-delivered the moment that profile handshakes.
+delivered the moment that profile connects.
 
 ## Screenshots
 
 `shot` returns a small image (downscaled to the configured max width, JPEG by
-default) — small enough for the harness to read fast. The CLI writes it to
-`~/.pilot/shots/` (or `--out`) and prints the path. Read it with:
+default). Active-tab captures use `captureVisibleTab`; background tabs use the
+DevTools Protocol, so no focus is touched. The CLI writes the file and prints
+the path:
 
 ```sh
-./ocr ~/.pilot/shots/12345.png          # plain text lines
-./ocr ~/.pilot/shots/12345.png --json   # per-line boxes + confidence
+./ocr ~/.pilot/shots/12345.jpg          # plain text lines
+./ocr ~/.pilot/shots/12345.jpg --json   # per-line boxes + confidence
 ```
+
+## Small-model eval
+
+`eval/drive.mjs` hands a task to any OpenRouter model and lets it drive a real
+tab, one JSON action per turn, using the refined instruction block in
+`eval/prompt.md`:
+
+```sh
+node eval/drive.mjs "Order a medium pizza with bacon on https://httpbin.org/forms/post ..."
+```
+
+GLM 5.3 Flash completes form-fill and search-and-extract tasks in ~13 steps.
 
 ## Settings
 
@@ -162,12 +160,13 @@ Pilot options page (right-click the icon → Options):
 
 - **Profile name** — how this Chrome profile appears on the relay
 - **Relay URL** / **Harness URL** — where the relay and harness listen
+- **Trusted input** — clicks/keys via the Chrome debugger (on by default)
+- **Auto-connect on browser start** — on by default
 - **Auto-start the relay on Connect** — on by default
-- **Driven-tab group name and color** — the group Pilot puts driven tabs in
-  (default `Harness` / red); the agent targets tabs in this group
-- **Bring the driven tab forward on every action** — off by default (background mode)
-- **Screenshot method** — auto / CDP always / visible tab only
-- **Screenshot max width** and **format**
+- **Driven-tab group name and color** — default `Harness` / red
+- **Bring the driven tab forward on every action** — off by default
+- **Visual feedback** (glow + cursor) — off for clean recordings
+- **Screenshot method / max width / format**
 
 ## Tests
 
@@ -180,7 +179,7 @@ npm test        # node:test — relay handshake, multi-profile, queuing, status
 1. `git clone https://github.com/FatherMarz/pilot.git`
 2. `open chrome://extensions`, turn on **Developer mode**
 3. **Load unpacked** → select the `extension/` folder
-4. Pin Pilot, click Connect, done.
+4. Pin Pilot to the toolbar — it connects on its own.
 
 ## License
 
