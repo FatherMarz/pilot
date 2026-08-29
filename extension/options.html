@@ -62,6 +62,14 @@
   </div>
 
   <div class="field check">
+    <input type="checkbox" id="trustedInput">
+    <div>
+      <label style="margin:0">Trusted input (clicks and keys via the Chrome debugger)</label>
+      <p class="desc">On: pages receive real user input (isTrusted true), like a human click. Falls back to simulated events automatically. Off: simulated events only.</p>
+    </div>
+  </div>
+
+  <div class="field check">
     <input type="checkbox" id="autoConnect">
     <div>
       <label style="margin:0">Auto-connect on browser start</label>

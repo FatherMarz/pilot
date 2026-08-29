@@ -178,6 +178,7 @@ const HELP = {
     clickXY: `{"action":"clickXY","x":300,"y":500} — viewport coordinates from snap`,
     type: `{"action":"type","text":"hello"} — into the visible field; add "sel" to pick one`,
     replace: `{"action":"replace","sel":"#name","text":"Ada"} — clear the field, then type`,
+    typeKeys: `{"action":"typeKeys","sel":"#card","text":"4242"} — real per-character keystrokes, for masked/formatted fields where type/fill isn't enough`,
     fill: `{"action":"fill","sel":"[name=size]","value":"medium"} — set input/select value`,
     fillShadow: `{"action":"fillShadow","match":"email","value":"a@b.c"} — reach fields inside shadow DOM`,
     key: `{"action":"key","key":"Enter"} — add "meta":true or "shift":true`,

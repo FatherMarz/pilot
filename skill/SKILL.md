@@ -22,6 +22,12 @@ node cli.js '{"action":"clickN","n":4}' --session myjob # 3. ACT: click item 4 f
 node cli.js '{"action":"snap"}' --session myjob         # 4. CONFIRM it worked
 ```
 
+Clicks and keys are TRUSTED input: Pilot resolves the element, then clicks it
+through the Chrome debugger, so pages see `event.isTrusted === true` — same as
+a human click (and same as Claude in Chrome). If the debugger is busy or the
+element is covered, it falls back to simulated events automatically; the reply's
+`via` field says which path ran (`cdp`, `synthetic-covered`, `synthetic-fallback`).
+
 Look before you click. Snap, act, snap again. One action at a time.
 `clickN` (click by snap item number) is the most reliable click — no selector, no
 text-matching, no coordinates. When in doubt: `node cli.js '{"action":"help"}'`
@@ -62,6 +68,7 @@ Every reply is JSON with an `ok` field.
 | Type into the visible field | `{"action":"type","text":"hello"}` — sets the field to the text |
 | Type into a specific field | `{"action":"type","sel":"#message","text":"hi"}` |
 | Replace field content | `{"action":"replace","sel":"#name","text":"Ada"}` |
+| Real keystrokes (masked/formatted fields) | `{"action":"typeKeys","sel":"#card","text":"4242424242424242"}` — use when `type`/`fill` doesn't stick |
 | Set input/select value | `{"action":"fill","sel":"[name=size]","value":"medium"}` — selects also match by option label |
 | Fill a shadow-DOM field | `{"action":"fillShadow","match":"email","value":"a@b.c"}` — `match` is a substring of the field's name/placeholder/aria-label |
 | Press a key | `{"action":"key","key":"Enter"}` (`"meta":true`, `"shift":true`) |

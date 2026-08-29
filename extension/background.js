@@ -30,6 +30,13 @@ const DEFAULT_SETTINGS = {
   // the harness keeps its hands after a reboot; turn it off in Options for a
   // strictly manual handshake.
   autoConnect: true,
+  // Send clicks and keys through the Chrome debugger so the page receives
+  // REAL trusted input (event.isTrusted === true), exactly like a human click.
+  // Element targeting stays the same (clickN/clickText resolve the element,
+  // scroll it into view, and the debugger clicks its center). Falls back to
+  // synthetic events automatically when another debugger holds the tab or the
+  // element is covered.
+  trustedInput: true,
 };
 
 let settings = { ...DEFAULT_SETTINGS };
@@ -241,6 +248,31 @@ function actFunc(mode, a, b, c, d) {
     const chk = checkedOf(item.el);
     return { ok: true, clicked: item.text || item.icon, n: a, x: p.x, y: p.y, ...(chk !== undefined ? { checkedNow: chk } : {}) };
   }
+  // Frameworks (React, Angular, Vue) track input state off their own value
+  // tracker or (input)/(change) listeners, not off the raw DOM property. A
+  // direct `.value =` assignment is invisible to them — the field LOOKS
+  // filled but the model behind it stays empty. The fix has three parts:
+  //   1. Write through the native prototype setter (bypasses React's patched
+  //      setter, which would otherwise swallow the same-value check).
+  //   2. Fire keydown/input/keyup/change, all bubbling, so whichever event
+  //      the framework listens on (Angular reactive forms use (input); some
+  //      slug/derive-field logic hooks keyup) actually sees the change.
+  //   3. Fire blur/focusout WITHOUT moving real focus, so blur-triggered
+  //      validation runs — but document.activeElement stays put, because
+  //      `{"action":"type"}` then `{"action":"key","key":"Enter"}` (see
+  //      README) depends on the field still being the active element.
+  const fireValueEvents = (el, text) => {
+    const opts = { bubbles: true, cancelable: true };
+    el.dispatchEvent(new KeyboardEvent("keydown", opts));
+    try {
+      el.dispatchEvent(new InputEvent("input", { ...opts, inputType: "insertText", data: text }));
+    } catch {
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    el.dispatchEvent(new KeyboardEvent("keyup", opts));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  };
   if (mode === "type" || mode === "replace") {
     const all = [...document.querySelectorAll('[contenteditable="true"], textarea, input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])')];
     const el = (a && document.querySelector(a)) || all.find((e) => e.offsetParent !== null);
@@ -253,15 +285,238 @@ function actFunc(mode, a, b, c, d) {
     if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
       const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
       Object.getOwnPropertyDescriptor(proto, "value").set.call(el, b);
-      el.dispatchEvent(new Event("input", { bubbles: true }));
+      fireValueEvents(el, b);
       via = "value";
-    } else {
+    } else if (el.isContentEditable) {
       if (mode === "replace") document.execCommand("selectAll", false, null);
-      via = "insertText:" + document.execCommand("insertText", false, b);
+      const ok = document.execCommand("insertText", false, b);
+      if (!ok) {
+        el.textContent = b;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      via = "insertText:" + ok;
+    } else {
+      via = "none";
     }
     return { ok: true, typed: b.length + " chars", into: el.tagName.toLowerCase() + (el.name ? "[name=" + el.name + "]" : ""), via, valueNow: (el.value ?? el.innerText ?? "").slice(0, 60) };
   }
+  if (mode === "typeKeys") {
+    // Value-set + input event still isn't enough for some fields — masked or
+    // per-keystroke-transformed inputs (card numbers, phone formatting) that
+    // read from the actual keystroke stream. This drives one real
+    // keydown/keypress/input/keyup cycle per character instead of one bulk set.
+    const all = [...document.querySelectorAll('[contenteditable="true"], textarea, input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])')];
+    const el = (a && document.querySelector(a)) || all.find((e) => e.offsetParent !== null);
+    if (!el) {
+      return { ok: false, error: a ? "no field matches selector '" + a + "'" : "no visible text field on the page", fields: all.slice(0, 10).map((e) => ({ tag: e.tagName.toLowerCase(), name: e.name || null, placeholder: e.placeholder || null })), hint: "run {\"action\":\"form\"} to see every field" };
+    }
+    pointAt(el);
+    el.focus();
+    const isNative = el.tagName === "TEXTAREA" || el.tagName === "INPUT";
+    const setter = isNative
+      ? Object.getOwnPropertyDescriptor(el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype, "value").set
+      : null;
+    if (isNative) setter.call(el, "");
+    else if (el.isContentEditable) { document.execCommand("selectAll", false, null); document.execCommand("delete", false, null); }
+    const text = String(b);
+    for (const ch of text) {
+      const opts = { key: ch, bubbles: true, cancelable: true };
+      el.dispatchEvent(new KeyboardEvent("keydown", opts));
+      el.dispatchEvent(new KeyboardEvent("keypress", opts));
+      if (isNative) {
+        setter.call(el, el.value + ch);
+        try {
+          el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, inputType: "insertText", data: ch }));
+        } catch {
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      } else if (el.isContentEditable) {
+        document.execCommand("insertText", false, ch);
+      }
+      el.dispatchEvent(new KeyboardEvent("keyup", opts));
+    }
+    if (isNative) el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    return { ok: true, typed: text.length + " chars (keystrokes)", into: el.tagName.toLowerCase() + (el.name ? "[name=" + el.name + "]" : ""), via: "keys", valueNow: (el.value ?? el.innerText ?? "").slice(0, 60) };
+  }
   return { ok: false, error: "unknown mode " + mode };
+}
+
+// ── trusted-input support ───────────────────────────────────────────────────
+// locateFunc resolves the SAME element the synthetic modes would (identical
+// matching logic), scrolls it into view, and reports its viewport center so
+// the debugger can click it with a real, trusted mouse event. If the center
+// is covered by something else (sticky header, overlay), it clicks
+// synthetically right here and returns a final result instead — a covered
+// element can still receive dispatched events, but not a coordinate click.
+function locateFunc(mode, a, c, showFeedback) {
+  const base = "cb-bridge-";
+  const ensureArm = () => {
+    let cursor = document.getElementById(base + "cursor");
+    if (!cursor) {
+      cursor = document.createElement("div");
+      cursor.id = base + "cursor";
+      cursor.style.cssText =
+        "position:fixed;left:0;top:0;width:22px;height:22px;pointer-events:none;z-index:2147483647;display:none;";
+      cursor.innerHTML =
+        '<svg width="22" height="22" viewBox="0 0 24 24" style="filter:drop-shadow(0 1px 3px rgba(0,0,0,0.8))"><path d="M4 2l16 9.5-6.8 1.6L9 20.5z" fill="#fff" stroke="#c00" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+      document.documentElement.appendChild(cursor);
+    }
+    return cursor;
+  };
+  const labelOf = (el) =>
+    (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.title || "").trim();
+  const clickables = () => [...document.querySelectorAll(
+    "button, a, input, textarea, select, [role=button], [role=checkbox], [role=link], [role=tab], [onclick], label, span, div, li")];
+  const visibleTexts = () => {
+    const seen = new Set();
+    const out = [];
+    for (const el of clickables()) {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      const t = labelOf(el).slice(0, 50);
+      if (!t || t.length > 50 || seen.has(t) || el.children.length > 3) continue;
+      seen.add(t);
+      out.push(t);
+      if (out.length >= 15) break;
+    }
+    return out;
+  };
+  const fireClick = (el, x, y) => {
+    const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+    el.dispatchEvent(new PointerEvent("pointerdown", opts));
+    el.dispatchEvent(new PointerEvent("pointerup", opts));
+    for (const type of ["mousedown", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, opts));
+  };
+  const checkedOf = (el) => {
+    const input = el.tagName === "INPUT" ? el : (el.control || (el.querySelector && el.querySelector("input")) || null);
+    return input && (input.type === "radio" || input.type === "checkbox") ? input.checked : undefined;
+  };
+
+  // Resolve the target with the same logic as the synthetic modes.
+  let el = null;
+  let meta = {};
+  if (mode === "click") {
+    el = a && document.querySelector(a);
+    if (!el) return { ok: false, error: "no element matches selector '" + a + "'", visibleTexts: visibleTexts(), hint: "click by text instead: {\"action\":\"clickText\",\"text\":\"...\"} or by number after a snap: {\"action\":\"clickN\",\"n\":3}" };
+    meta = { clicked: a, text: labelOf(el).slice(0, 50) };
+  } else if (mode === "clickText") {
+    const want = String(a);
+    const wantLc = want.toLowerCase();
+    const rank = (x) => {
+      const t = (x.innerText || "").trim();
+      const tLc = t.toLowerCase();
+      if (t === want) return 0;
+      if (c) return 99;
+      if (tLc === wantLc) return 1;
+      if (t.startsWith(want)) return 2;
+      if (tLc.startsWith(wantLc)) return 3;
+      if (tLc.includes(wantLc)) return 4;
+      return 99;
+    };
+    const control = (x) => /^(button|a|input|select|textarea|label)$/i.test(x.tagName) || x.getAttribute("role") ? 0 : 1;
+    let best = null;
+    for (const cand of clickables()) {
+      const r = cand.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      const tier = rank(cand);
+      if (tier === 99) continue;
+      const len = (cand.innerText || "").trim().length;
+      const score = [tier, control(cand), len];
+      if (!best || score[0] < best.score[0] ||
+          (score[0] === best.score[0] && (score[1] < best.score[1] ||
+          (score[1] === best.score[1] && score[2] < best.score[2])))) {
+        best = { el: cand, score };
+      }
+    }
+    if (!best) return { ok: false, error: "no clickable element with text '" + want + "'" + (c ? " (exact)" : ""), visibleTexts: visibleTexts(), hint: "pick one of visibleTexts, or snap and use clickN" };
+    el = best.el;
+    meta = { clicked: labelOf(el).slice(0, 50), tag: el.tagName.toLowerCase(), match: ["exact", "exact-ci", "starts", "starts-ci", "contains-ci"][best.score[0]] };
+  } else if (mode === "clickN") {
+    const items = [...document.querySelectorAll("button, a, input, textarea, select, [role=dialog], [role=checkbox], label")]
+      .map((x) => {
+        const r = x.getBoundingClientRect();
+        const text = labelOf(x).slice(0, 70);
+        const icon = x.tagName === "BUTTON" && !(x.innerText || "").trim() ? "icon-btn" : "";
+        return { el: x, visible: r.width > 0 && r.height > 0, text, icon };
+      })
+      .filter((i) => i.visible && (i.text || i.icon))
+      .slice(0, 120);
+    const item = items[a];
+    if (!item) return { ok: false, error: "no item " + a + " (snap listed " + items.length + " items)", hint: "snap again — the page changed" };
+    el = item.el;
+    meta = { clicked: item.text || item.icon, n: a };
+  } else {
+    return { ok: false, error: "locate: unknown mode " + mode };
+  }
+
+  // Bring it into view, then check the center actually hits it.
+  const r0 = el.getBoundingClientRect();
+  if (r0.top < 0 || r0.bottom > innerHeight || r0.left < 0 || r0.right > innerWidth) {
+    el.scrollIntoView({ block: "center", inline: "center" });
+  }
+  const r = el.getBoundingClientRect();
+  const x = Math.round(r.x + r.width / 2);
+  const y = Math.round(r.y + r.height / 2);
+  if (showFeedback !== false) {
+    const cursor = ensureArm();
+    cursor.style.left = x + "px";
+    cursor.style.top = y + "px";
+    cursor.style.display = "block";
+  }
+  const hit = document.elementFromPoint(x, y);
+  const reachable = hit && (hit === el || el.contains(hit) || hit.contains(el) ||
+    (el.control && (hit === el.control || el.control.contains(hit))));
+  if (!reachable) {
+    // Covered — a coordinate click would hit the overlay, so click in place.
+    fireClick(el, x, y);
+    const chk = checkedOf(el);
+    return { ok: true, ...meta, x, y, via: "synthetic-covered", ...(chk !== undefined ? { checkedNow: chk } : {}) };
+  }
+  for (const old of document.querySelectorAll("[data-pilot-t]")) old.removeAttribute("data-pilot-t");
+  el.setAttribute("data-pilot-t", "1");
+  return { needsCdp: true, x, y, result: { ok: true, ...meta, x, y } };
+}
+
+// After a trusted click: read back toggle state from the tagged element.
+function confirmClickFunc() {
+  const el = document.querySelector("[data-pilot-t]");
+  if (!el) return {};
+  el.removeAttribute("data-pilot-t");
+  const input = el.tagName === "INPUT" ? el : (el.control || (el.querySelector && el.querySelector("input")) || null);
+  if (input && (input.type === "radio" || input.type === "checkbox")) return { checkedNow: input.checked };
+  return {};
+}
+
+// Focus a field (same resolution as type/typeKeys) so trusted keystrokes from
+// the debugger land in it. Clears it first — typeKeys semantics.
+function focusFieldFunc(sel) {
+  const all = [...document.querySelectorAll('[contenteditable="true"], textarea, input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])')];
+  const el = (sel && document.querySelector(sel)) || all.find((e) => e.offsetParent !== null);
+  if (!el) {
+    return { ok: false, error: sel ? "no field matches selector '" + sel + "'" : "no visible text field on the page", fields: all.slice(0, 10).map((e) => ({ tag: e.tagName.toLowerCase(), name: e.name || null, placeholder: e.placeholder || null })), hint: "run {\"action\":\"form\"} to see every field" };
+  }
+  el.scrollIntoView({ block: "center" });
+  el.focus();
+  if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+    const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, "value").set.call(el, "");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  } else if (el.isContentEditable) {
+    document.execCommand("selectAll", false, null);
+    document.execCommand("delete", false, null);
+  }
+  for (const old of document.querySelectorAll("[data-pilot-t]")) old.removeAttribute("data-pilot-t");
+  el.setAttribute("data-pilot-t", "1");
+  return { ok: true, into: el.tagName.toLowerCase() + (el.name ? "[name=" + el.name + "]" : "") };
+}
+
+// Read the tagged field's value after trusted typing.
+function fieldValueFunc() {
+  const el = document.querySelector("[data-pilot-t]");
+  if (!el) return { valueNow: "" };
+  el.removeAttribute("data-pilot-t");
+  return { valueNow: String(el.value ?? el.innerText ?? "").slice(0, 60) };
 }
 
 function snapFunc() {
@@ -313,6 +568,32 @@ function findTextFunc(text) {
   return out;
 }
 function fillFunc(sel, value) {
+  // Same framework-visibility problem as type/replace: a raw `.value =` (or
+  // even the native setter alone) is invisible to React/Angular/Vue unless
+  // the events they listen on also fire. See actFunc's fireValueEvents for
+  // the full rationale; this is the same fix, duplicated because Chrome
+  // serializes each injected function standalone (no shared module scope).
+  const setNative = (el, v) => {
+    const proto = el.tagName === "SELECT" ? window.HTMLSelectElement.prototype :
+      el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, "value").set.call(el, v);
+  };
+  const fireEvents = (el) => {
+    if (el.tagName === "SELECT") {
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
+    }
+    const opts = { bubbles: true, cancelable: true };
+    el.dispatchEvent(new KeyboardEvent("keydown", opts));
+    try {
+      el.dispatchEvent(new InputEvent("input", { ...opts, inputType: "insertText", data: String(el.value) }));
+    } catch {
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    el.dispatchEvent(new KeyboardEvent("keyup", opts));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  };
   const el = sel && document.querySelector(sel);
   if (!el) {
     const fields = [...document.querySelectorAll("input:not([type=hidden]), select, textarea")]
@@ -320,17 +601,16 @@ function fillFunc(sel, value) {
       .map((e) => ({ tag: e.tagName.toLowerCase(), name: e.name || null, id: e.id || null, placeholder: e.placeholder || null }));
     return { ok: false, error: "no field matches selector '" + sel + "'", fields, hint: "use a name from this list, e.g. {\"action\":\"fill\",\"sel\":\"[name=email]\",\"value\":\"...\"}" };
   }
-  const proto = el.tagName === "SELECT" ? window.HTMLSelectElement.prototype :
-    el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-  Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
-  el.dispatchEvent(new Event(el.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
+  el.focus();
+  setNative(el, value);
+  fireEvents(el);
   if (el.tagName === "SELECT" && el.value !== value) {
     // Value didn't stick — the option value is different from the label.
     const options = [...el.options].map((o) => ({ value: o.value, label: o.innerText.trim() }));
     const byLabel = options.find((o) => o.label.toLowerCase() === String(value).toLowerCase());
     if (byLabel) {
-      Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set.call(el, byLabel.value);
-      el.dispatchEvent(new Event("change", { bubbles: true }));
+      setNative(el, byLabel.value);
+      fireEvents(el);
       return { ok: true, filled: sel, valueNow: el.value, note: "matched option by label" };
     }
     return { ok: false, error: "select has no option '" + value + "'", options, hint: "use one of these values" };
@@ -352,8 +632,22 @@ function fillShadowFunc(match, value) {
       if (wantLc && id.includes(wantLc)) {
         const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype :
           el.tagName === "SELECT" ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
+        el.focus();
         Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
-        el.dispatchEvent(new Event("input", { bubbles: true }));
+        if (el.tagName === "SELECT") {
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        } else {
+          const opts = { bubbles: true, cancelable: true };
+          el.dispatchEvent(new KeyboardEvent("keydown", opts));
+          try {
+            el.dispatchEvent(new InputEvent("input", { ...opts, inputType: "insertText", data: String(value) }));
+          } catch {
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          el.dispatchEvent(new KeyboardEvent("keyup", opts));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+        }
         return { ok: true, filled: id };
       }
     }
@@ -461,6 +755,71 @@ const METADATA_ACTIONS = new Set([
   "tabInfo", "closeTab", "harnessTab", "newHarnessTab",
 ]);
 
+// ── trusted input via the Chrome debugger ───────────────────────────────────
+// Input.dispatch* events arrive as REAL user input: event.isTrusted === true,
+// default actions run (form submit on Enter, native focus, :active styles).
+// Attach/detach per action; if another debugger owns the tab, the caller
+// falls back to synthetic events.
+
+function cdpSend(tabId, commands) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.attach({ tabId }, "1.3", () => {
+      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+      const step = (i) => {
+        if (i >= commands.length) {
+          chrome.debugger.detach({ tabId }, () => {});
+          return resolve(true);
+        }
+        chrome.debugger.sendCommand({ tabId }, commands[i][0], commands[i][1], () => {
+          if (chrome.runtime.lastError) {
+            chrome.debugger.detach({ tabId }, () => {});
+            return reject(new Error(chrome.runtime.lastError.message));
+          }
+          step(i + 1);
+        });
+      };
+      step(0);
+    });
+  });
+}
+
+function cdpClick(tabId, x, y) {
+  const base = { x, y, button: "left", clickCount: 1, pointerType: "mouse" };
+  return cdpSend(tabId, [
+    ["Input.dispatchMouseEvent", { type: "mouseMoved", ...base, buttons: 0 }],
+    ["Input.dispatchMouseEvent", { type: "mousePressed", ...base, buttons: 1 }],
+    ["Input.dispatchMouseEvent", { type: "mouseReleased", ...base, buttons: 1 }],
+  ]);
+}
+
+const CDP_VK = {
+  Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46,
+  ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40,
+  Home: 36, End: 35, PageUp: 33, PageDown: 34, " ": 32,
+};
+
+function cdpKey(tabId, key, meta, shift) {
+  const modifiers = (meta ? 4 : 0) | (shift ? 8 : 0);
+  const vk = CDP_VK[key] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0);
+  const text = key === "Enter" ? "\r" : (key.length === 1 ? key : undefined);
+  const down = { type: "keyDown", modifiers, key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk };
+  if (text !== undefined && !meta) down.text = text;
+  return cdpSend(tabId, [
+    ["Input.dispatchKeyEvent", down],
+    ["Input.dispatchKeyEvent", { type: "keyUp", modifiers, key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }],
+  ]);
+}
+
+function cdpTypeText(tabId, text) {
+  const commands = [];
+  for (const ch of String(text).slice(0, 1000)) {
+    const vk = ch.toUpperCase().charCodeAt(0);
+    commands.push(["Input.dispatchKeyEvent", { type: "keyDown", key: ch, text: ch, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }]);
+    commands.push(["Input.dispatchKeyEvent", { type: "keyUp", key: ch, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }]);
+  }
+  return cdpSend(tabId, commands);
+}
+
 async function dispatchAction(msg, reply) {
   const action = msg.action;
 
@@ -535,18 +894,81 @@ async function dispatchAction(msg, reply) {
     return r && r.result;
   };
 
+  // A non-active tab never processes debugger input — the renderer is parked.
+  // Make ours the active tab of ITS OWN window (usually the dedicated agent
+  // window). The window itself stays in the background; user focus is
+  // untouched — that needs windows.update({focused}), which we don't do.
+  const ensureRendered = async () => {
+    const [active] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+    if (!active || active.id !== tab.id) await chrome.tabs.update(tab.id, { active: true });
+  };
+
+  // Element clicks: resolve the element, then click it with a REAL debugger
+  // mouse event (isTrusted: true). Falls back to synthetic dispatch when the
+  // element is covered, the debugger is taken, or trustedInput is off.
+  const trustedClick = async (mode, arg, exact) => {
+    if (!settings.trustedInput) return await run(actFunc, [mode, arg, null, exact, settings.visualFeedback]);
+    await ensureRendered().catch(() => {});
+    const loc = await run(locateFunc, [mode, arg, exact, settings.visualFeedback]);
+    if (!loc || loc.needsCdp !== true) return loc; // final result (error or synthetic-covered)
+    try {
+      await cdpClick(tab.id, loc.x, loc.y);
+      let confirm = {};
+      try { confirm = (await run(confirmClickFunc, [])) || {}; } catch { /* page navigated — fine */ }
+      return { ...loc.result, ...confirm, via: "cdp" };
+    } catch {
+      const fb = await run(actFunc, [mode, arg, null, exact, settings.visualFeedback]);
+      if (fb && typeof fb === "object") fb.via = "synthetic-fallback";
+      return fb;
+    }
+  };
+
   switch (action) {
     case "snap": return await run(snapFunc, []);
     case "dialog": return await run(dialogFunc, []);
     case "form": return await run(formFunc, []);
-    case "click": return await run(actFunc, ["click", String(msg.sel || ""), null, null, settings.visualFeedback]);
-    case "clickXY": return await run(actFunc, ["clickXY", Number(msg.x), Number(msg.y), null, settings.visualFeedback]);
-    case "key": return await run(actFunc, ["key", String(msg.key || ""), Boolean(msg.meta), Boolean(msg.shift), settings.visualFeedback]);
+    case "click": return await trustedClick("click", String(msg.sel || ""), null);
+    case "clickText": return await trustedClick("clickText", String(msg.text || ""), Boolean(msg.exact));
+    case "clickN": return await trustedClick("clickN", Number(msg.n), null);
+    case "clickXY": {
+      if (settings.trustedInput) {
+        try {
+          await ensureRendered();
+          await cdpClick(tab.id, Number(msg.x), Number(msg.y));
+          return { ok: true, x: Number(msg.x), y: Number(msg.y), via: "cdp" };
+        } catch { /* fall through to synthetic */ }
+      }
+      return await run(actFunc, ["clickXY", Number(msg.x), Number(msg.y), null, settings.visualFeedback]);
+    }
+    case "key": {
+      if (settings.trustedInput) {
+        try {
+          await ensureRendered();
+          await cdpKey(tab.id, String(msg.key || ""), Boolean(msg.meta), Boolean(msg.shift));
+          return { ok: true, key: String(msg.key || ""), via: "cdp" };
+        } catch { /* fall through to synthetic */ }
+      }
+      return await run(actFunc, ["key", String(msg.key || ""), Boolean(msg.meta), Boolean(msg.shift), settings.visualFeedback]);
+    }
+    case "typeKeys": {
+      // Real per-character keystrokes from the debugger — what masked or
+      // per-key-formatted fields (card numbers, OTP boxes) actually require.
+      if (settings.trustedInput) {
+        const focus = await run(focusFieldFunc, [String(msg.sel || "")]);
+        if (!focus || focus.ok !== true) return focus;
+        try {
+          await ensureRendered();
+          await cdpTypeText(tab.id, String(msg.text || ""));
+          let after = {};
+          try { after = (await run(fieldValueFunc, [])) || {}; } catch { /* ignore */ }
+          return { ok: true, typed: String(msg.text || "").length + " chars (trusted keystrokes)", into: focus.into, via: "cdp", ...after };
+        } catch { /* fall through to synthetic */ }
+      }
+      return await run(actFunc, ["typeKeys", String(msg.sel || ""), String(msg.text || ""), null, settings.visualFeedback]);
+    }
     case "tail": return await run(actFunc, ["tail", null, null, null, settings.visualFeedback]);
     case "read": return await run(actFunc, ["read", Number(msg.offset) || 0, null, null, settings.visualFeedback]);
     case "hrefs": return await run(actFunc, ["hrefs", String(msg.text || ""), null, null, settings.visualFeedback]);
-    case "clickText": return await run(actFunc, ["clickText", String(msg.text || ""), null, Boolean(msg.exact), settings.visualFeedback]);
-    case "clickN": return await run(actFunc, ["clickN", Number(msg.n), null, null, settings.visualFeedback]);
     case "findText": return await run(findTextFunc, [String(msg.text || "")]);
     case "fill": return await run(fillFunc, [String(msg.sel || ""), String(msg.value ?? "")]);
     case "fillShadow": return await run(fillShadowFunc, [String(msg.match || ""), String(msg.value ?? "")]);
