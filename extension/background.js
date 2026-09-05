@@ -161,6 +161,16 @@ function actFunc(mode, a, b, c, d) {
     fireClick(el, p.x, p.y);
     return { ok: true, clicked: el.tagName.toLowerCase(), text: labelOf(el).slice(0, 50), x: a, y: b };
   }
+  if (mode === "hoverXY") {
+    const el = document.elementFromPoint(a, b);
+    if (!el) return { ok: false, error: "no element at " + a + "," + b, hint: "coordinates are viewport pixels; run snap for fresh ones" };
+    pointAt(el);
+    const opts = { bubbles: true, cancelable: true, clientX: a, clientY: b, view: window };
+    el.dispatchEvent(new MouseEvent("mouseover", opts));
+    el.dispatchEvent(new MouseEvent("mousemove", opts));
+    try { el.dispatchEvent(new MouseEvent("mouseenter", opts)); } catch { /* React reads mouseover */ }
+    return { ok: true, hovered: el.tagName.toLowerCase(), text: labelOf(el).slice(0, 50), x: a, y: b, via: "synthetic" };
+  }
   if (mode === "tail") {
     const text = (document.body && document.body.innerText || "");
     return text.slice(-3000);
@@ -488,6 +498,86 @@ function confirmClickFunc() {
   return {};
 }
 
+// After a hover-only move, re-read the tagged element's center. Hover-revealed
+// controls can slide into place on mouseenter, so the pre-hover center is
+// stale — this returns the post-hover one. Tag stays put for confirmClickFunc.
+function remeasureFunc() {
+  const el = document.querySelector("[data-pilot-t]");
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+}
+
+// Resolve an element the same way clickText/clickN/click do, but only to
+// report its center for a hover move — no click, no coverage fallback (a hover
+// can land on anything). Tags the element so remeasureFunc can re-read it.
+function hoverFunc(mode, a, c) {
+  const labelOf = (el) =>
+    (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.title || "").trim();
+  let el = null;
+  let meta = {};
+  if (mode === "sel") {
+    el = a && document.querySelector(a);
+    if (!el) return { ok: false, error: "no element matches selector '" + a + "'", hint: "use hoverXY with viewport coordinates instead" };
+    meta = { text: labelOf(el).slice(0, 50) };
+  } else if (mode === "text") {
+    const want = String(a);
+    const wantLc = want.toLowerCase();
+    const rank = (x) => {
+      const t = (x.innerText || "").trim();
+      const tLc = t.toLowerCase();
+      if (t === want) return 0;
+      if (c) return 99;
+      if (tLc === wantLc) return 1;
+      if (t.startsWith(want)) return 2;
+      if (tLc.startsWith(wantLc)) return 3;
+      if (tLc.includes(wantLc)) return 4;
+      return 99;
+    };
+    const control = (x) => /^(button|a|input|select|textarea|label)$/i.test(x.tagName) || x.getAttribute("role") ? 0 : 1;
+    let best = null;
+    for (const cand of document.querySelectorAll("button, a, input, textarea, select, [role=button], [role=checkbox], [role=link], [role=tab], [onclick], label, span, div, li")) {
+      const r = cand.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      const tier = rank(cand);
+      if (tier === 99) continue;
+      const len = (cand.innerText || "").trim().length;
+      const score = [tier, control(cand), len];
+      if (!best || score[0] < best.score[0] ||
+          (score[0] === best.score[0] && (score[1] < best.score[1] ||
+          (score[1] === best.score[1] && score[2] < best.score[2])))) {
+        best = { el: cand, score };
+      }
+    }
+    if (!best) return { ok: false, error: "no element with text '" + want + "'", hint: "use hoverXY with viewport coordinates instead" };
+    el = best.el;
+    meta = { text: labelOf(el).slice(0, 50) };
+  } else if (mode === "n") {
+    const items = [...document.querySelectorAll("button, a, input, textarea, select, [role=dialog], [role=checkbox], label")]
+      .map((x) => {
+        const r = x.getBoundingClientRect();
+        const text = labelOf(x).slice(0, 70);
+        const icon = x.tagName === "BUTTON" && !(x.innerText || "").trim() ? "icon-btn" : "";
+        return { el: x, visible: r.width > 0 && r.height > 0, text, icon };
+      })
+      .filter((i) => i.visible && (i.text || i.icon))
+      .slice(0, 120);
+    const item = items[Number(a)];
+    if (!item) return { ok: false, error: "no item " + a, hint: "snap again — the page changed" };
+    el = item.el;
+    meta = { text: item.text || item.icon, n: Number(a) };
+  } else {
+    return { ok: false, error: "hover needs one of: n, text, sel, or x+y (use hoverXY)" };
+  }
+  el.scrollIntoView({ block: "center", inline: "center" });
+  const r = el.getBoundingClientRect();
+  const x = Math.round(r.x + r.width / 2);
+  const y = Math.round(r.y + r.height / 2);
+  for (const old of document.querySelectorAll("[data-pilot-t]")) old.removeAttribute("data-pilot-t");
+  el.setAttribute("data-pilot-t", "1");
+  return { ok: true, ...meta, x, y };
+}
+
 // Focus a field (same resolution as type/typeKeys) so trusted keystrokes from
 // the debugger land in it. Clears it first — typeKeys semantics.
 function focusFieldFunc(sel) {
@@ -792,6 +882,15 @@ function cdpClick(tabId, x, y) {
   ]);
 }
 
+// Hover-only move: the debugger mouse glides to (x, y) and stops there — no
+// press. This reveals hover-only controls (a "..." button that only shows on
+// mouseenter). Real trusted input, so CSS :hover and React mouseenter both fire.
+function cdpHover(tabId, x, y) {
+  return cdpSend(tabId, [
+    ["Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0, pointerType: "mouse" }],
+  ]);
+}
+
 const CDP_VK = {
   Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46,
   ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40,
@@ -925,7 +1024,16 @@ async function dispatchAction(msg, reply) {
     const loc = await run(locateFunc, [mode, arg, exact, settings.visualFeedback]);
     if (!loc || loc.needsCdp !== true) return loc; // final result (error or synthetic-covered)
     try {
-      await cdpClick(tab.id, loc.x, loc.y);
+      // Hover first, then re-measure. Hover-revealed controls (a "..." that
+      // appears on mouseenter) can move when they show up, so clicking the
+      // pre-hover center misses them. The hover-only move triggers :hover, a
+      // short beat lets React re-render, then we click the element's NEW center.
+      await cdpHover(tab.id, loc.x, loc.y);
+      await new Promise((r) => setTimeout(r, 60));
+      const rem = await run(remeasureFunc, []);
+      const cx = rem && rem.x != null ? rem.x : loc.x;
+      const cy = rem && rem.y != null ? rem.y : loc.y;
+      await cdpClick(tab.id, cx, cy);
       let confirm = {};
       try { confirm = (await run(confirmClickFunc, [])) || {}; } catch { /* page navigated — fine */ }
       return { ...loc.result, ...confirm, via: "cdp" };
@@ -951,6 +1059,32 @@ async function dispatchAction(msg, reply) {
         } catch { /* fall through to synthetic */ }
       }
       return await run(actFunc, ["clickXY", Number(msg.x), Number(msg.y), null, settings.visualFeedback]);
+    }
+    case "hoverXY": {
+      if (settings.trustedInput && await canRenderTrusted().catch(() => false)) {
+        try {
+          await cdpHover(tab.id, Number(msg.x), Number(msg.y));
+          return { ok: true, x: Number(msg.x), y: Number(msg.y), via: "cdp" };
+        } catch { /* fall through to synthetic */ }
+      }
+      return await run(actFunc, ["hoverXY", Number(msg.x), Number(msg.y), null, settings.visualFeedback]);
+    }
+    case "hover": {
+      // Resolve like clickN/clickText/click, then glide the mouse onto the
+      // element's center WITHOUT pressing — reveals hover-only UI. Accepts
+      // {n}, {text} (+exact), or {sel}; use hoverXY for raw coordinates.
+      const hm = msg.sel ? "sel" : (msg.text ? "text" : (msg.n != null ? "n" : null));
+      const ha = hm === "sel" ? msg.sel : (hm === "text" ? msg.text : (hm === "n" ? msg.n : null));
+      if (!hm) return { ok: false, error: "hover needs {n}, {text}, or {sel} — or use hoverXY with {x},{y}" };
+      const loc = await run(hoverFunc, [hm, ha, msg.exact ? true : null]);
+      if (!loc || !loc.ok) return loc;
+      if (settings.trustedInput && await canRenderTrusted().catch(() => false)) {
+        try {
+          await cdpHover(tab.id, loc.x, loc.y);
+          return { ok: true, ...loc, via: "cdp" };
+        } catch { /* fall through to synthetic */ }
+      }
+      return await run(actFunc, ["hoverXY", loc.x, loc.y, null, settings.visualFeedback]);
     }
     case "key": {
       if (settings.trustedInput && await canRenderTrusted().catch(() => false)) {

@@ -176,6 +176,8 @@ const HELP = {
     clickText: `{"action":"clickText","text":"Save"} — forgiving match; add "exact":true to pin it`,
     click: `{"action":"click","sel":"button.submit"} — CSS selector`,
     clickXY: `{"action":"clickXY","x":300,"y":500} — viewport coordinates from snap`,
+    hoverXY: `{"action":"hoverXY","x":300,"y":500} — move mouse there, no click (reveals hover-only UI)`,
+    hover: `{"action":"hover","text":"Save"} — resolve by {text}/{n}/{sel}, move mouse onto it without clicking`,
     type: `{"action":"type","text":"hello"} — into the visible field; add "sel" to pick one`,
     replace: `{"action":"replace","sel":"#name","text":"Ada"} — clear the field, then type`,
     typeKeys: `{"action":"typeKeys","sel":"#card","text":"4242"} — real per-character keystrokes, for masked/formatted fields where type/fill isn't enough`,

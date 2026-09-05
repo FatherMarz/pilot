@@ -36,6 +36,12 @@ window), so:
 Every reply's `via` field says which path ran: `cdp`, `synthetic-background`,
 `synthetic-covered`, or `synthetic-fallback`.
 
+Hover-revealed controls (a "..." that only appears on mouseenter) are handled
+automatically: a trusted click first glides the mouse onto the element, lets the
+hover state settle, re-measures the element's *new* position, then clicks — so it
+never clicks the stale pre-hover spot. For hovering *without* clicking, use
+`hover` / `hoverXY`.
+
 ## Quick start
 
 ```sh
@@ -109,6 +115,8 @@ node cli.js '{"action":"clickN","n":3}'              # click item 3 from the las
 node cli.js '{"action":"clickText","text":"Save"}'   # forgiving text match ("exact":true to pin)
 node cli.js '{"action":"click","sel":"button.x"}'    # CSS selector
 node cli.js '{"action":"clickXY","x":100,"y":200}'   # coordinates
+node cli.js '{"action":"hoverXY","x":100,"y":200}'   # move mouse there, no click (reveals hover-only UI)
+node cli.js '{"action":"hover","text":"Save"}'       # resolve by {text}/{n}/{sel}, move mouse onto it, no click
 node cli.js '{"action":"type","sel":"#msg","text":"hi"}'      # set a field (framework-safe events)
 node cli.js '{"action":"replace","sel":"#name","text":"Ada"}' # clear then type
 node cli.js '{"action":"typeKeys","sel":"#card","text":"4242"}' # real per-char keystrokes (masked fields)
@@ -153,6 +161,21 @@ node eval/drive.mjs "Order a medium pizza with bacon on https://httpbin.org/form
 ```
 
 GLM 5.3 Flash completes form-fill and search-and-extract tasks in ~13 steps.
+
+## Vision driving
+
+`vision.mjs` runs the same loop but with eyes: every turn it bundles the DOM
+snapshot (numbered items) **with** a screenshot and sends both to a vision model
+on OpenRouter, which returns the next JSON action. Use it when the DOM alone
+isn't enough — hover-only menus, canvas, shadow DOM, or "is the menu actually
+open yet?".
+
+```sh
+node vision.mjs "delete every OT security chat in the sidebar" --model google/gemini-2.0-flash
+```
+
+Defaults to a cheap vision model; override with `--model` (any OpenRouter
+vision-capable slug). Reads `OPENROUTER_API_KEY` from `~/.dsh/.credentials.yaml`.
 
 ## Settings
 
