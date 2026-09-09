@@ -1,13 +1,13 @@
 ---
 name: pilot
-description: "Drive Marcello's Chrome browser from the harness via the Pilot bridge — clicks, keys, typing, form fills, tab management, and small screenshots (read locally with OCR, no vision API key needed). Use when Marcello asks you to do something in the browser (a web app, a form, a marketplace page), when you need to see or interact with a page, or when a task mentions Pilot or driving Chrome. Requires the Pilot relay (starts with the harness) and the Pilot extension in Chrome (auto-connects)."
+description: "Drive the user's Chrome browser from the harness via the Pilot bridge — clicks, keys, typing, form fills, tab management, and small screenshots (read locally with OCR, no vision API key needed). Use when the user asks you to do something in the browser (a web app, a form, a marketplace page), when you need to see or interact with a page, or when a task mentions Pilot or driving Chrome. Requires the Pilot relay (starts with the harness) and the Pilot extension in Chrome (auto-connects)."
 ---
 
 # /pilot — Drive Chrome from the harness
 
 Pilot is a local bridge: a Chrome extension + a relay + a CLI. You command the CLI,
 the relay routes to the connected Chrome profile, the extension clicks/types/snapshots
-the page. It works on **background tabs** — you do not need to steal Marcello's window.
+the page. It works on **background tabs** — you do not need to steal the user's window.
 
 Everything lives at `~/Documents/Development/custom-tools/pilot`. Run commands from there.
 
@@ -25,7 +25,7 @@ node cli.js '{"action":"snap"}' --session myjob         # 4. CONFIRM it worked
 Clicks and keys are TRUSTED input: Pilot resolves the element, then clicks it
 through the Chrome debugger, so pages see `event.isTrusted === true` — same as
 a human click (and same as Claude in Chrome). Pilot NEVER disturbs the user: if the target
-tab sits in the window Marcello is working in, it stays a background tab and
+tab sits in the window the user is working in, it stays a background tab and
 gets simulated events instead (those work fine unfocused). The reply's `via`
 field says which path ran (`cdp`, `synthetic-background`, `synthetic-covered`,
 `synthetic-fallback`).
@@ -50,7 +50,7 @@ Every reply is JSON with an `ok` field.
    It starts with the harness; if it is down, run `node server.js` in the pilot dir
    (background it).
 2. If `profiles` is empty the extension is not connected. It auto-connects on browser
-   start, so normally it is already there. If it is genuinely absent, ask Marcello ONCE
+   start, so normally it is already there. If it is genuinely absent, ask the user ONCE
    to click **Connect** in the Pilot popup. **Do not ask twice.**
 3. `node cli.js --status` shows the connected profile names. Target one with
    `--profile NAME` (default is `default`).
@@ -116,7 +116,7 @@ For plain text content, `snap` (`.text`) is cheaper than a screenshot.
 
 - `timeout — is the relay running?` → start it: `node server.js` (in the pilot dir).
 - `"queued": true` → that profile is not connected. Check `--status`; if genuinely
-  disconnected, ask Marcello once to click Connect in the popup.
+  disconnected, ask the user once to click Connect in the popup.
 - `unknown action` → the extension is running old code. Send `{"action":"reload"}`,
   wait 3s; it auto-reconnects with the new code.
 - Screenshot empty/black → the tab may be discarded; `navigate` first to wake it.

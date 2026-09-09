@@ -943,6 +943,39 @@ async function dispatchAction(msg, reply) {
         const t = await chrome.tabs.get(msg.tabId);
         return { id: t.id, windowId: t.windowId, url: t.url || "", title: t.title || "", groupId: t.groupId };
       }
+      case "gc": {
+        // Sweep leftover agent tabs: every about:blank tab in a Harness group
+        // that no live session still pins, plus unfocused agent windows that
+        // hold nothing but blank Harness tabs. Real pages and focused windows
+        // are never touched.
+        const keep = new Set(msg.keepTabIds || []);
+        const removed = [];
+        const gcGroups = await chrome.tabGroups.query({ title: settings.groupName }).catch(() => []);
+        for (const g of gcGroups) {
+          const tabs = await chrome.tabs.query({ groupId: g.id });
+          for (const t of tabs || []) {
+            const blank = !t.url || t.url.startsWith("about:blank");
+            if (blank && !keep.has(t.id)) {
+              await chrome.tabs.remove(t.id).catch(() => {});
+              removed.push(t.id);
+            }
+          }
+        }
+        const closedWindows = [];
+        const gcWins = await chrome.windows.getAll({ populate: true });
+        for (const w of gcWins) {
+          if (w.focused || w.type !== "normal") continue;
+          const gcTabs = w.tabs || [];
+          const agentOnly = gcTabs.length > 0 && gcTabs.every(
+            (t) => t.groupId !== -1 && (!t.url || t.url.startsWith("about:blank"))
+          );
+          if (agentOnly) {
+            await chrome.windows.remove(w.id).catch(() => {});
+            closedWindows.push(w.id);
+          }
+        }
+        return { removedTabs: removed, closedWindows };
+      }
       case "closeTab": {
         await chrome.tabs.remove(msg.tabId);
         return { ok: true, closed: msg.tabId };

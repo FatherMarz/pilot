@@ -56,6 +56,8 @@ function parseArgs(argv) {
     else if (a === "--relay") { /* handled via env, kept for compat */ }
     else if (a === "--status") out.status = true;
     else if (a === "--sessions") out.sessions = true;
+    else if (a === "gc") out.json = '{"action":"gc"}';
+    else if (a === "--keep") out.keep = argv[++i];
     else out.json = a;
   }
   return out;
@@ -159,7 +161,7 @@ async function claimTab(opts) {
 // our own CLI-level convenience actions). They must not claim or create a tab.
 const NON_TAB_ACTIONS = new Set([
   "ping", "status", "tabs", "windows", "groups", "activeTab", "tabInfo", "closeTab",
-  "harnessTab", "newHarnessTab", "reload", "claim", "release", "guard", "help",
+  "harnessTab", "newHarnessTab", "reload", "claim", "release", "guard", "help", "gc",
 ]);
 
 // One screen, everything a driving model needs. Kept in the CLI so it works
@@ -194,6 +196,7 @@ const HELP = {
     claim: `{"action":"claim"} --session NAME — pin a dedicated tab`,
     guard: `{"action":"guard"} --session NAME — pull the tab back if it drifted`,
     release: `{"action":"release"} --session NAME — close the tab and forget it`,
+    gc: `node cli.js gc --keep SESSION — release every other session, close its tab, sweep empty Harness tabs/windows`,
   },
   flags: `--session NAME (always) | --profile NAME | --tab ID | --out FILE | --status | --sessions`,
   errors: `every reply has "ok". On ok:false read "error" and "hint"; most failures include the visible texts or fields to try next.`,
@@ -245,6 +248,28 @@ async function run(cmd, opts) {
     }
     clearSession(opts.session);
     console.log(JSON.stringify({ ok: true, session: opts.session, released: true }, null, 1));
+    return;
+  }
+
+  // ── gc: release every stale session pin, then sweep leftover agent tabs ───
+  if (cmd.action === "gc") {
+    const keep = opts.keep || opts.session;
+    const sessions = loadSessions();
+    const released = [];
+    const keepTabs = [];
+    for (const [name, pin] of Object.entries(sessions)) {
+      if (name === keep) {
+        if (pin && pin.tabId != null) keepTabs.push(pin.tabId);
+        continue;
+      }
+      if (pin && pin.tabId != null) {
+        await request({ action: "closeTab", tabId: pin.tabId }, { ...opts, profile: pin.profile || opts.profile }).catch(() => {});
+      }
+      released.push(name);
+    }
+    saveSessions(Object.fromEntries(Object.entries(sessions).filter(([n]) => n === keep)));
+    const sweep = await request({ action: "gc", keepTabIds: keepTabs }, opts).catch(() => ({ ok: false, error: "extension unreachable" }));
+    console.log(JSON.stringify({ ok: true, kept: keep, released, sweep: sweep.ok ? sweep.value : sweep.error }, null, 1));
     return;
   }
 

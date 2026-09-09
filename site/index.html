@@ -125,7 +125,7 @@
 
   <div class="tile">
     <h2><span class="n">01</span>You are the password</h2>
-      <p>The relay is localhost-only. A Chrome profile appears on it only after you click <strong>Connect</strong> in the Pilot popup — and disappears when you click <strong>Disconnect</strong> or close Chrome. No auto-reconnect, no background bots.</p>
+    <p>The relay is localhost-only. A Chrome profile appears on it when the Pilot extension connects — auto-connect is on by default and survives reboots; turn it off in Options or click Disconnect for a strictly manual handshake.</p>
       <p>Use different Chrome profiles for different jobs. Give each one a name, and the harness targets the right one:</p>
       <pre><code><span class="c"># work profile, personal profile — same machine, same relay</span>
 node cli.js '{"action":"click","text":"Deploy"}' --profile work
@@ -184,7 +184,7 @@ node cli.js '{"action":"snap"}'</code></pre>
   </div>
 
   <footer>
-    <span>Pilot · local · open source · made for modul4r</span>
+    <span>Pilot · local · open source · made for real work</span>
   </footer>
 </div>
 
