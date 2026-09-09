@@ -58,6 +58,8 @@ function parseArgs(argv) {
     else if (a === "--sessions") out.sessions = true;
     else if (a === "gc") out.json = '{"action":"gc"}';
     else if (a === "--keep") out.keep = argv[++i];
+    else if (a === "--no-reuse") out.noReuse = true;
+    else if (a === "--stale-minutes") out.staleMinutes = Number(argv[++i]);
     else out.json = a;
   }
   return out;
@@ -94,7 +96,7 @@ function getSession(name) {
 
 function setSession(name, entry) {
   const sessions = loadSessions();
-  sessions[name] = entry;
+  sessions[name] = { lastUsed: Date.now(), ...entry };
   saveSessions(sessions);
 }
 
@@ -102,6 +104,75 @@ function clearSession(name) {
   const sessions = loadSessions();
   delete sessions[name];
   saveSessions(sessions);
+}
+
+// Mark a pinned session as just-used, so "idle" staleness means "the agent
+// really stopped talking to this tab", not "never touched it".
+function touchSession(name) {
+  try {
+    const sessions = loadSessions();
+    if (sessions[name]) {
+      sessions[name].lastUsed = Date.now();
+      saveSessions(sessions);
+    }
+  } catch {}
+}
+
+// ── session reuse ───────────────────────────────────────────────────────────
+// A session idle longer than this (default 30 min) is fair game for adoption:
+// a later claim re-pins its tab instead of opening yet another one. Override
+// with --stale-minutes N; --no-reuse always opens a fresh tab.
+
+const STALE_DEFAULT_MIN = 30;
+
+function staleMs(opts) {
+  const min = opts.staleMinutes != null ? opts.staleMinutes : STALE_DEFAULT_MIN;
+  return min * 60000;
+}
+
+function profileKey(p) {
+  return String(p || "default").toLowerCase();
+}
+
+// Find the best tab to adopt: same profile, idle past the threshold, tab still
+// alive. Blank tabs win over real pages; older idles win among equals.
+async function findAdoptable(opts) {
+  const sessions = loadSessions();
+  const mine = profileKey(opts.profile);
+  const now = Date.now();
+  const candidates = [];
+  for (const [name, pin] of Object.entries(sessions)) {
+    if (!pin || pin.tabId == null) continue;
+    const age = now - (pin.lastUsed || 0);
+    if (age < staleMs(opts)) continue;
+    if (profileKey(pin.profile) !== mine) continue;
+    const info = await request({ action: "tabInfo", tabId: pin.tabId }, opts).catch(() => null);
+    if (!info || !info.ok || !info.value) continue;
+    candidates.push({
+      name,
+      pin,
+      age,
+      url: info.value.url || "",
+      windowId: info.value.windowId ?? null,
+      blankness: (info.value.url || "").startsWith("about:blank") ? 0 : 1,
+    });
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => a.blankness - b.blankness || b.age - a.age);
+  return candidates[0];
+}
+
+// If idle sessions are piling up, say so and name the exact cleanup command.
+function gcHint(opts) {
+  const sessions = loadSessions();
+  const names = Object.keys(sessions);
+  const now = Date.now();
+  const stale = names.filter((n) => {
+    const lu = sessions[n] && sessions[n].lastUsed;
+    return !lu || now - lu > staleMs(opts);
+  }).length;
+  if (stale < 3) return null;
+  return `${stale} stale of ${names.length} session(s) — run: node cli.js gc --keep ${opts.session}`;
 }
 
 // ── per-profile shared agent window ─────────────────────────────────────────
@@ -171,6 +242,9 @@ const HELP = {
     `claim a tab once:   node cli.js '{"action":"claim"}' --session myjob`,
     `then reuse it:      add --session myjob to every command`,
     `look before you click: snap first, act second, snap again to confirm`,
+    `claim is cheap by design: it reuses your tab, adopts an idle session's`,
+    `tab when one is free, and only opens a fresh tab as a last resort. Pass`,
+    `--no-reuse to force a new tab. If a hint offers gc, run it.`,
   ],
   commands: {
     snap: `{"action":"snap"} — title, url, page text, numbered clickable items`,
@@ -193,12 +267,12 @@ const HELP = {
     navigate: `{"action":"navigate","url":"https://example.com"} — waits for the page to load`,
     shot: `{"action":"shot"} — screenshot to ~/.pilot/shots; add --out FILE; read it with ./ocr FILE`,
     tabs: `{"action":"tabs"} — every open tab with ids`,
-    claim: `{"action":"claim"} --session NAME — pin a dedicated tab`,
+    claim: `{"action":"claim"} --session NAME — pin a dedicated tab (reuses yours, then adopts an idle one; --no-reuse forces fresh; --stale-minutes N overrides the 30-min idle threshold)`,
     guard: `{"action":"guard"} --session NAME — pull the tab back if it drifted`,
     release: `{"action":"release"} --session NAME — close the tab and forget it`,
     gc: `node cli.js gc --keep SESSION — release every other session, close its tab, sweep empty Harness tabs/windows`,
   },
-  flags: `--session NAME (always) | --profile NAME | --tab ID | --out FILE | --status | --sessions`,
+  flags: `--session NAME (always) | --profile NAME | --tab ID | --out FILE | --status | --sessions | --no-reuse | --stale-minutes N`,
   errors: `every reply has "ok". On ok:false read "error" and "hint"; most failures include the visible texts or fields to try next.`,
 };
 
@@ -215,9 +289,36 @@ async function run(cmd, opts) {
   }
 
   if (opts.sessions) {
-    console.log(JSON.stringify({ sessions: loadSessions(), windows: loadWindows() }, null, 1));
+    // Join the pins against the live tab list so agents see, per session:
+    // is the tab still there, what is it on, how long has it been idle.
+    const sessions = loadSessions();
+    const listing = await request({ action: "tabs" }, opts).catch(() => null);
+    const tabMap = new Map((listing && listing.ok ? listing.value : []).map((t) => [t.id, t]));
+    const now = Date.now();
+    const view = {};
+    for (const [name, pin] of Object.entries(sessions)) {
+      const tab = pin && pin.tabId != null ? tabMap.get(pin.tabId) : null;
+      const lastUsed = pin && pin.lastUsed;
+      view[name] = {
+        profile: profileKey(pin && pin.profile),
+        tabId: pin ? pin.tabId : null,
+        alive: !!tab,
+        url: tab ? tab.url : (pin && pin.url) || null,
+        idleMin: lastUsed ? Math.round((now - lastUsed) / 60000) : null,
+        stale: !lastUsed || now - lastUsed > staleMs(opts),
+        adoptedFrom: (pin && pin.adoptedFrom) || undefined,
+      };
+    }
+    const staleCount = Object.values(view).filter((s) => s.stale).length;
+    const hint = staleCount >= 3
+      ? `${staleCount} stale session(s) — run: node cli.js gc --keep ${opts.session}`
+      : undefined;
+    console.log(JSON.stringify({ sessions: view, windows: loadWindows(), ...(hint ? { hint } : {}) }, null, 1));
     return;
   }
+
+  // Any real work on a session marks it fresh, so idle-time means idle.
+  touchSession(opts.session);
 
   // ── claim: get or create a dedicated tab and pin it ───────────────────────
   if (cmd.action === "claim") {
@@ -226,7 +327,21 @@ async function run(cmd, opts) {
       // Verify the pinned tab still exists before reusing it.
       const info = await request({ action: "tabInfo", tabId: existing.tabId }, opts);
       if (info.ok && info.value) {
-        console.log(JSON.stringify({ ok: true, session: opts.session, tabId: existing.tabId, windowId: info.value.windowId ?? null, url: info.value.url, reused: true }, null, 1));
+        touchSession(opts.session);
+        console.log(JSON.stringify({ ok: true, session: opts.session, tabId: existing.tabId, windowId: info.value.windowId ?? null, url: info.value.url, reused: true, ...(gcHint(opts) ? { hint: gcHint(opts) } : {}) }, null, 1));
+        return;
+      }
+    }
+    // No live pin of our own: adopt an idle session's tab before opening a
+    // fresh one. Keeps agent windows and Harness groups from multiplying.
+    if (!opts.noReuse) {
+      const idle = await findAdoptable(opts);
+      if (idle) {
+        const sessions = loadSessions();
+        delete sessions[idle.name];
+        sessions[opts.session] = { lastUsed: Date.now(), tabId: idle.pin.tabId, url: null, windowId: idle.windowId, profile: opts.profile || idle.pin.profile || null, adoptedFrom: idle.name };
+        saveSessions(sessions);
+        console.log(JSON.stringify({ ok: true, session: opts.session, tabId: idle.pin.tabId, windowId: idle.windowId, url: idle.url, reused: true, adoptedFrom: idle.name, ...(gcHint(opts) ? { hint: gcHint(opts) } : {}) }, null, 1));
         return;
       }
     }
@@ -236,7 +351,7 @@ async function run(cmd, opts) {
       process.exit(1);
     }
     setSession(opts.session, { tabId: created.value.tabId, url: null, windowId: created.value.windowId ?? null, profile: opts.profile || null });
-    console.log(JSON.stringify({ ok: true, session: opts.session, tabId: created.value.tabId, windowId: created.value.windowId ?? null, profile: opts.profile || null, reused: false }, null, 1));
+    console.log(JSON.stringify({ ok: true, session: opts.session, tabId: created.value.tabId, windowId: created.value.windowId ?? null, profile: opts.profile || null, reused: false, ...(gcHint(opts) ? { hint: gcHint(opts) } : {}) }, null, 1));
     return;
   }
 

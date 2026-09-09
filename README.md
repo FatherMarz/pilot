@@ -89,10 +89,21 @@ other. `--profile NAME` picks the connected Chrome profile. `--new-window`
 forces a fresh window, `--here` shares the focused one, `--window ID` a
 specific one. `--tab ID` overrides the pin for one call.
 
+Claim is frugal by default: it reuses your pinned tab, then **adopts the tab
+of an idle session** (same profile, idle 30+ min, blank tabs first) instead of
+opening another one, and only creates a fresh tab as a last resort.
+`--no-reuse` forces a new tab; `--stale-minutes N` changes the idle threshold.
+
+When idle sessions pile up, claim and `--sessions` return a `hint` naming the
+cleanup command. `--sessions` lists every session with its tab state, URL, and
+idle time, so an agent can see the whole board before acting.
+
 ```sh
-node cli.js '{"action":"claim"}' --session NAME     # pin a dedicated tab
+node cli.js '{"action":"claim"}' --session NAME     # pin a dedicated tab (reuses/adopts first)
 node cli.js '{"action":"guard"}' --session NAME     # pull the tab back if it drifted
 node cli.js '{"action":"release"}' --session NAME   # close the pinned tab, forget it
+node cli.js --sessions --profile NAME               # every session: alive, url, idle
+node cli.js gc --keep NAME --profile NAME           # release all others, sweep Harness groups
 ```
 
 One hard limit: Chrome allows one debugger per tab, so two agents must not

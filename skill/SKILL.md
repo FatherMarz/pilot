@@ -35,6 +35,13 @@ Look before you click. Snap, act, snap again. One action at a time.
 text-matching, no coordinates. When in doubt: `node cli.js '{"action":"help"}'`
 prints every command with an example (works even with the relay down).
 
+Claim is frugal by default: it reuses your tab, then adopts an idle session's
+tab (same profile, idle 30+ min) instead of opening another one. `--no-reuse`
+forces a fresh tab. Check the board with `node cli.js --sessions` (shows every
+session's tab, URL, and idle time). If a reply carries a `hint` suggesting
+`node cli.js gc --keep <your-session>`, several sessions are stale — run it.
+When done, `{"action":"release"}` closes your tab and keeps the group tidy.
+
 ## Reading replies
 
 Every reply is JSON with an `ok` field.
