@@ -950,15 +950,25 @@ async function dispatchAction(msg, reply) {
         // are never touched.
         const keep = new Set(msg.keepTabIds || []);
         const removed = [];
+        const ungrouped = [];
         const gcGroups = await chrome.tabGroups.query({ title: settings.groupName }).catch(() => []);
         for (const g of gcGroups) {
           const tabs = await chrome.tabs.query({ groupId: g.id });
+          const survivors = [];
           for (const t of tabs || []) {
             const blank = !t.url || t.url.startsWith("about:blank");
             if (blank && !keep.has(t.id)) {
               await chrome.tabs.remove(t.id).catch(() => {});
               removed.push(t.id);
+            } else {
+              survivors.push(t.id);
             }
+          }
+          // Real pages the user (or a stray claim) dragged in: ungroup them so
+          // the Harness group disappears instead of holding their tabs hostage.
+          if (survivors.length) {
+            await chrome.tabs.ungroup(survivors).catch(() => {});
+            ungrouped.push(...survivors);
           }
         }
         const closedWindows = [];
@@ -974,7 +984,7 @@ async function dispatchAction(msg, reply) {
             closedWindows.push(w.id);
           }
         }
-        return { removedTabs: removed, closedWindows };
+        return { removedTabs: removed, ungrouped, closedWindows };
       }
       case "closeTab": {
         await chrome.tabs.remove(msg.tabId);
