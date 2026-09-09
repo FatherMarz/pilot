@@ -842,7 +842,7 @@ function shouldBringForward(action) {
 // into the Harness group as a side effect of a mere listing.
 const METADATA_ACTIONS = new Set([
   "ping", "reload", "status", "tabs", "windows", "activeTab",
-  "tabInfo", "closeTab", "harnessTab", "newHarnessTab",
+  "tabInfo", "closeTab", "harnessTab", "newHarnessTab", "gc",
 ]);
 
 // ── trusted input via the Chrome debugger ───────────────────────────────────
