@@ -2,7 +2,7 @@
   "name": "pilot",
   "version": "0.2.0",
   "description": "Local bridge so any agent harness can drive a Chrome profile. Relay + MV3 extension + CLI.",
-  "private": true,
+  "license": "MIT",
   "scripts": {
     "start": "node server.js",
     "test": "node --test",

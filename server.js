@@ -71,8 +71,8 @@ function createRelay(port = DEFAULT_PORT) {
 
       // ── Extension connects: the handshake ─────────────────────────────
       if (msg.hello === "extension") {
-        // Profile names are matched case-insensitively so "Cabreza" and
-        // "cabreza" are the same profile.
+        // Profile names are matched case-insensitively so "Work" and
+        // "work" are the same profile.
         const profile = String(msg.profile || "default").slice(0, 64).toLowerCase();
         const stale = extensions.get(profile);
         if (stale && stale !== ws) {
