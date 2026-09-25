@@ -1,0 +1,50 @@
+# Pilot
+
+> Pilot is a local bridge so any agent harness can drive a Chrome profile:
+> clicks, keys, typing, form fills, tab management, and small screenshots. It
+> does not steal your window. It is free and open source under the MIT licence.
+
+## What it is
+
+Pilot has three pieces:
+
+- A Chrome extension (Manifest V3). It connects to the relay when the browser
+  starts. The popup shows the state and can disconnect.
+- A relay, `server.js`. It runs on localhost. One relay serves every Chrome
+  profile on the machine.
+- A command-line client, `cli.js`. The harness sends it JSON actions, for
+  example `node cli.js '{"action":"snap"}'`.
+
+It also includes `ocr.swift`, an on-device OCR tool that uses macOS Vision. It
+reads screenshot text with no API key.
+
+## How an agent drives a page
+
+- `snap` returns the page text and a numbered list of clickable items.
+- `clickN` clicks an item by its number. The agent then snaps again to check.
+- Clicks and keys go through the Chrome debugger, so pages get real, trusted
+  input. If the tab is in the window you are using, Pilot sends simulated
+  events instead, so your focus is not touched.
+- Each agent uses `--session NAME` and gets its own pinned tab. Two agents do
+  not drive the same tab.
+- `--profile NAME` picks which connected Chrome profile to drive.
+- Commands to a profile that is not connected wait on the relay until it
+  connects.
+
+## Install
+
+1. Clone https://github.com/FatherMarz/pilot
+2. Open chrome://extensions and turn on Developer mode.
+3. Click Load unpacked and select the `extension/` folder.
+4. Run the relay with `node server.js`. A harness normally starts it for you.
+
+## Cost and licence
+
+Free. MIT licence.
+
+## Links
+
+- [Home](https://pilot.modul4r.com/): overview, CLI cheat sheet, and
+  instructions to copy into an agent.
+- [Source code](https://github.com/FatherMarz/pilot): README with the full
+  command list.
