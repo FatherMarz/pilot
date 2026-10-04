@@ -9,12 +9,12 @@ Pilot is a local bridge: a Chrome extension + a relay + a CLI. You command the C
 the relay routes to the connected Chrome profile, the extension clicks/types/snapshots
 the page. It works on **background tabs** — you do not need to steal the user's window.
 
-Everything lives at `~/Documents/Development/custom-tools/pilot`. Run commands from there.
+Run every command from the directory where you cloned Pilot.
 
 ## The golden loop (do this, in this order)
 
 ```sh
-cd ~/Documents/Development/custom-tools/pilot
+cd pilot
 node cli.js '{"action":"claim"}' --session myjob        # 1. pin a tab, ONCE
 node cli.js '{"action":"navigate","url":"https://..."}' --session myjob   # waits for load
 node cli.js '{"action":"snap"}' --session myjob         # 2. LOOK: numbered items

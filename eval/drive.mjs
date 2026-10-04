@@ -8,7 +8,7 @@
 // command, truncates results, and logs the full transcript to /tmp.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,9 +27,10 @@ if (!task) {
   process.exit(1);
 }
 
-const creds = readFileSync(join(homedir(), ".dsh", ".credentials.yaml"), "utf8");
-const apiKey = (creds.match(/OPENROUTER_API_KEY:\s*["']?([^"'\s]+)/) || [])[1];
-if (!apiKey) { console.error("no OPENROUTER_API_KEY in ~/.dsh/.credentials.yaml"); process.exit(1); }
+const credsPath = join(homedir(), ".dsh", ".credentials.yaml");
+const apiKey = process.env.OPENROUTER_API_KEY ||
+  (existsSync(credsPath) && (readFileSync(credsPath, "utf8").match(/OPENROUTER_API_KEY:\s*["']?([^"'\s]+)/) || [])[1]);
+if (!apiKey) { console.error("set OPENROUTER_API_KEY"); process.exit(1); }
 
 const systemPrompt = readFileSync(join(ROOT, "eval", "prompt.md"), "utf8");
 

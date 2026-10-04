@@ -189,7 +189,7 @@ open yet?".
 node vision.mjs "close every open chat in the sidebar" --model google/gemini-2.0-flash
 ```
 
-Override the default model with `--model` (any OpenRouter vision model). Reads `OPENROUTER_API_KEY` from `~/.dsh/.credentials.yaml`.
+Override the default model with `--model` (any OpenRouter vision model). Reads `OPENROUTER_API_KEY` from the environment.
 
 ## Settings
 

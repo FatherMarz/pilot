@@ -34,10 +34,11 @@ if (!task) {
   process.exit(1);
 }
 
-const creds = readFileSync(join(homedir(), ".dsh", ".credentials.yaml"), "utf8");
-const apiKey = (creds.match(/OPENROUTER_API_KEY:\s*["']?([^"'\s]+)/) || [])[1];
+const credsPath = join(homedir(), ".dsh", ".credentials.yaml");
+const apiKey = process.env.OPENROUTER_API_KEY ||
+  (existsSync(credsPath) && (readFileSync(credsPath, "utf8").match(/OPENROUTER_API_KEY:\s*["']?([^"'\s]+)/) || [])[1]);
 if (!apiKey) {
-  console.error("no OPENROUTER_API_KEY in ~/.dsh/.credentials.yaml");
+  console.error("set OPENROUTER_API_KEY");
   process.exit(1);
 }
 
