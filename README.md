@@ -1,7 +1,7 @@
 # Pilot
 
-A local bridge so any agent harness can drive a Chrome profile — clicks, keys,
-typing, form fills, tab management, and small screenshots — without stealing
+A local bridge that lets an agent harness drive a Chrome profile: clicks, keys,
+typing, form fills, tab management and small screenshots, without taking over
 your window.
 
 Three pieces:
@@ -12,19 +12,18 @@ Three pieces:
 | `server.js` | The relay. One relay serves every Chrome profile on the machine. `node server.js`. |
 | `cli.js` | Harness-side client. `node cli.js '{"action":"snap"}'`. Run `node cli.js '{"action":"help"}'` for the full cheat sheet. |
 
-Plus `ocr.swift` — an on-device macOS Vision OCR tool (`swiftc -O ocr.swift -o ocr`)
-that reads screenshot text with **zero API keys**, which is how a harness reads
-Pilot screenshots even when a vision provider key is unavailable.
+`ocr.swift` is an on-device macOS Vision OCR tool (`npm run build:ocr`) that reads
+screenshot text without an API key.
 
 ## Trusted input
 
 Clicks and keys go through the Chrome debugger (`Input.dispatch*`), so pages
-receive **real user input**: `event.isTrusted === true`, default actions run,
+receive real user input: `event.isTrusted === true`, default actions run,
 same as a human click. Element targeting stays semantic — `clickN`/`clickText`
 resolve the element, scroll it into view, and the debugger clicks its center —
 so a shifted layout cannot make it miss.
 
-Pilot never disturbs you. Debugger input needs the tab rendered (active in its
+Pilot does not steal focus. Debugger input needs the tab rendered (active in its
 window), so:
 
 - Tab in an **unfocused window** (the usual dedicated agent window) → Pilot
@@ -42,16 +41,23 @@ hover state settle, re-measures the element's *new* position, then clicks — so
 never clicks the stale pre-hover spot. For hovering *without* clicking, use
 `hover` / `hoverXY`.
 
+## Install
+
+```sh
+git clone https://github.com/FatherMarz/pilot.git
+cd pilot && npm install
+```
+
+Open `chrome://extensions`, turn on Developer mode, choose **Load unpacked** and
+select the `extension/` folder. Pin Pilot to the toolbar.
+
 ## Quick start
 
 ```sh
-# 1. Load the extension (chrome://extensions → Developer mode → Load unpacked)
-#    point it at the extension/ folder. Pin Pilot to the toolbar.
-
-# 2. Run the relay (a harness normally starts it for you)
+# Run the relay (a harness normally starts it for you)
 node server.js
 
-# 3. Drive it
+# Drive it
 node cli.js --status
 node cli.js '{"action":"claim"}' --session myjob
 node cli.js '{"action":"navigate","url":"https://example.com"}' --session myjob
@@ -66,7 +72,7 @@ browser restart.
 
 ## The loop a driving model follows
 
-`snap` returns the page text plus a **numbered** list of clickable items;
+`snap` returns the page text plus a numbered list of clickable items;
 `clickN` clicks by that number; snap again confirms. No selectors, no
 coordinates, no exact spelling needed. Every reply has `ok`; failures carry
 recovery data — a failed click returns `visibleTexts`, a failed fill returns
@@ -171,8 +177,6 @@ tab, one JSON action per turn, using the refined instruction block in
 node eval/drive.mjs "Order a medium pizza with bacon on https://httpbin.org/forms/post ..."
 ```
 
-GLM 5.3 Flash completes form-fill and search-and-extract tasks in ~13 steps.
-
 ## Vision driving
 
 `vision.mjs` runs the same loop but with eyes: every turn it bundles the DOM
@@ -182,11 +186,10 @@ isn't enough — hover-only menus, canvas, shadow DOM, or "is the menu actually
 open yet?".
 
 ```sh
-node vision.mjs "delete every OT security chat in the sidebar" --model google/gemini-2.0-flash
+node vision.mjs "close every open chat in the sidebar" --model google/gemini-2.0-flash
 ```
 
-Defaults to a cheap vision model; override with `--model` (any OpenRouter
-vision-capable slug). Reads `OPENROUTER_API_KEY` from `~/.dsh/.credentials.yaml`.
+Override the default model with `--model` (any OpenRouter vision model). Reads `OPENROUTER_API_KEY` from `~/.dsh/.credentials.yaml`.
 
 ## Settings
 
@@ -208,13 +211,6 @@ Pilot options page (right-click the icon → Options):
 npm test        # node:test — relay handshake, multi-profile, queuing, status
 ```
 
-## Install (unpacked)
-
-1. `git clone https://github.com/FatherMarz/pilot.git`
-2. `open chrome://extensions`, turn on **Developer mode**
-3. **Load unpacked** → select the `extension/` folder
-4. Pin Pilot to the toolbar — it connects on its own.
-
 ## License
 
-MIT
+MIT. Built by Marcello Delcaro, AI-assisted.
