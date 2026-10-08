@@ -84,7 +84,75 @@
     return { close, ungroup, forget };
   }
 
-  const api = { mergeSnapItems, selectSweep };
+  // Chrome debugger errors that mean "this tab's session is gone or was
+  // refused", which a detach + fresh attach can cure. Timeouts are NOT in
+  // the list: a timed-out Input event may still have been delivered, and
+  // sending it again would act twice.
+  const HEALABLE = /not attached|Detached while handling|No target with given id|Target closed|Cannot access a chrome-extension|different extension|Cannot access contents of url "chrome-extension|Inspected target navigated or closed|Cannot find context|Session with given id not found/i;
+  function cdpHealable(message) {
+    const m = String(message || "");
+    if (/timed out/i.test(m)) return false;
+    return HEALABLE.test(m);
+  }
+
+  // Run one debugger command; on a healable error reset the tab's debugger
+  // state (heal: detach, clear, reattach, re-enable focus emulation) and try
+  // ONCE more. A second failure, an unhealable error or a failed heal is
+  // thrown to the caller, which falls back to simulated input.
+  async function withHeal(send, heal) {
+    try {
+      return await send();
+    } catch (e) {
+      if (!cdpHealable(e && e.message)) throw e;
+      await heal(e);
+      return await send();
+    }
+  }
+
+  // Page shim for JavaScript dialogs when the debugger is out. Both
+  // functions run in the page's MAIN world via executeScript (they must stay
+  // self-contained: no closure over this file).
+  function dialogShim(on, policy) {
+    const K = "__pilotDialogShim";
+    let S = window[K];
+    if (!S) {
+      S = { log: [], policy: null, on: false, orig: { alert: window.alert, confirm: window.confirm, prompt: window.prompt } };
+      Object.defineProperty(window, K, { value: S, configurable: true });
+      const answer = (type, message, def) => {
+        const pol = S.policy || { accept: true };
+        const accepted = pol.accept !== false;
+        const rec = { type, message: String(message === undefined ? "" : message).slice(0, 500), accepted, at: Date.now() };
+        if (type === "prompt") rec.promptText = pol.promptText != null ? String(pol.promptText) : String(def === undefined ? "" : def);
+        S.log.push(rec);
+        if (S.log.length > 20) S.log.shift();
+        if (pol.once) S.policy = null;
+        return rec;
+      };
+      S.fake = {
+        alert: function alert(m) { answer("alert", m); },
+        confirm: function confirm(m) { return answer("confirm", m).accepted; },
+        prompt: function prompt(m, d) { const r = answer("prompt", m, d); return r.accepted ? r.promptText : null; },
+      };
+      // Capture on window runs before the page's own beforeunload handlers
+      // (and onbeforeunload), so none of them can ask "leave this page?".
+      window.addEventListener("beforeunload", (e) => { if (S.on) e.stopImmediatePropagation(); }, true);
+    }
+    S.policy = policy || null;
+    S.on = !!on;
+    for (const k of ["alert", "confirm", "prompt"]) window[k] = on ? S.fake[k] : S.orig[k];
+    if (on) window.onbeforeunload = null;
+    return true;
+  }
+
+  function drainShim() {
+    const S = window.__pilotDialogShim;
+    if (!S || !S.log.length) return [];
+    const out = S.log;
+    S.log = [];
+    return out;
+  }
+
+  const api = { mergeSnapItems, selectSweep, cdpHealable, withHeal, dialogShim, drainShim };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.PilotShared = api;
 })(typeof self !== "undefined" ? self : globalThis);

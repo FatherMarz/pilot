@@ -156,3 +156,14 @@ test("form errors: only messages tied to the field count", () => {
   // a valid field with no signals has no error
   assert.equal(fieldError(el("INPUT", { type: "text" }, { validity: { valid: true } }), lookup), "");
 });
+
+test("foreign extension frames: other extensions yes, Pilot itself and web pages no", () => {
+  const { foreignExtFrame } = require("../extension/page.js");
+  const own = "abcdefghijklmnopabcdefghijklmnop";
+  assert.equal(foreignExtFrame("chrome-extension://pejdijmoenmkgeppbflobdenhhabjlaj/completion_list.html?x=1", own), true);
+  assert.equal(foreignExtFrame("CHROME-EXTENSION://PEJDIJMOENMKGEPPBFLOBDENHHABJLAJ/", own), true);
+  assert.equal(foreignExtFrame("chrome-extension://" + own + "/popup.html", own), false);
+  assert.equal(foreignExtFrame("https://example.com/chrome-extension://pejdijmoenmkgeppbflobdenhhabjlaj/", own), false);
+  assert.equal(foreignExtFrame("", own), false);
+  assert.equal(foreignExtFrame(null, own), false);
+});

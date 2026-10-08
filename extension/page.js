@@ -263,6 +263,15 @@
     return !!(el && el.validity && el.validity.valueMissing);
   }
 
+  // Is this frame URL a page of ANOTHER extension? Chrome refuses (and
+  // drops) the debugger on any tab that holds such a frame, so Pilot keeps
+  // them out of the tabs it drives.
+  function foreignExtFrame(url, ownId) {
+    const m = /^chrome-extension:\/\/([a-p]{32})(?:[/?#]|$)/i.exec(String(url || "").trim());
+    return !!m && m[1].toLowerCase() !== String(ownId || "").toLowerCase();
+  }
+
+  P.foreignExtFrame = foreignExtFrame;
   P.accessibleName = accessibleName;
   P.roleOf = roleOf;
   P.textMatches = textMatches;
@@ -346,6 +355,67 @@
     P.boot = boot;
     return { doc: P.doc };
   };
+  // ── other extensions' frames ──────────────────────────────────────────────
+  // A password manager's inline menu (an iframe of chrome-extension://...)
+  // makes Chrome refuse the debugger for the whole tab and detach it if it
+  // is attached. In a tab Pilot drives, such frames are removed as they
+  // appear, including inside open or closed shadow roots, so trusted input
+  // keeps working. Never runs in a tab Pilot does not drive.
+  const shadowOf = (el) => {
+    try { if (globalThis.chrome && chrome.dom && chrome.dom.openOrClosedShadowRoot) return chrome.dom.openOrClosedShadowRoot(el); } catch { /* not an element host */ }
+    return el.shadowRoot || null;
+  };
+  let extGuard = null;
+  P.guardExtFrames = (ownId) => {
+    if (!extGuard) {
+      const g = { ownId, removed: [], roots: new WeakSet() };
+      const check = (el) => {
+        if (el.nodeType !== 1) return;
+        const u = el.getAttribute && (el.getAttribute("src") || el.getAttribute("data") || "");
+        if (/^(IFRAME|FRAME|EMBED|OBJECT)$/.test(el.tagName) && foreignExtFrame(u || el.src || el.data, g.ownId)) {
+          el.remove();
+          g.removed.push(String(u || el.src || "").slice(0, 80));
+          if (g.removed.length > 20) g.removed.shift();
+          g.count = (g.count || 0) + 1;
+          if (document.documentElement) document.documentElement.setAttribute("data-pilot-xf", String(g.count));
+        }
+      };
+      const scan = (root) => {
+        if (root.nodeType === 1) { check(root); const sr = shadowOf(root); if (sr) watch(sr); }
+        const tw = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+        for (let n = tw.nextNode(); n; n = tw.nextNode()) {
+          check(n);
+          const sr = shadowOf(n);
+          if (sr) watch(sr);
+        }
+      };
+      const obs = new MutationObserver((muts) => {
+        for (const m of muts) {
+          if (m.type === "attributes") { check(m.target); continue; }
+          for (const n of m.addedNodes) {
+            if (n.nodeType !== 1) continue;
+            scan(n);
+            // A host may get its shadow root (and the frame inside it) a
+            // moment after it is inserted.
+            for (const ms of [0, 60, 300]) setTimeout(() => { if (n.isConnected) scan(n); }, ms);
+          }
+        }
+      });
+      const watch = (root) => {
+        if (g.roots.has(root)) return;
+        g.roots.add(root);
+        obs.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "data"] });
+        scan(root);
+      };
+      g.sweep = () => scan(document);
+      extGuard = g;
+      watch(document);
+    } else {
+      extGuard.sweep();
+    }
+    return { removed: extGuard.removed.length };
+  };
+
   P.docInfo = () => ({ doc: P.doc, url: location.href, top: window === window.top });
 
   function refOf(el) {
