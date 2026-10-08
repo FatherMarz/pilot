@@ -27,6 +27,7 @@ function fakeExtension(port, profile, handler) {
     const msg = JSON.parse(d.toString());
     if (msg.type === "handshake" || !msg.id) return;
     const value = handler ? handler(msg) : { url: "https://example.com/" };
+    if (value && value.__fail) return ws.send(JSON.stringify({ id: msg.id, ok: false, error: value.__fail }));
     ws.send(JSON.stringify({ id: msg.id, ok: true, value: value === undefined ? null : value }));
   });
   return ws;
@@ -144,4 +145,41 @@ test("--sessions shows staleness and the gc hint once 3+ sessions are stale", as
   }));
   const out2 = await runCli(["--sessions", "--profile", "work", "--stale-minutes", "30"], home2, port);
   assert.equal(out2.hint, undefined);
+});
+
+test("claim drops pins whose tab is gone and auto-releases pins idle over 24h", async (t) => {
+  const relay = createRelay(0);
+  const port = await relay.listen(0);
+  t.after(() => relay.close());
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pilot-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+
+  const closed = [];
+  const ext = fakeExtension(port, "work", (msg) => {
+    if (msg.action === "tabInfo") {
+      if (msg.tabId === 1) return { __fail: "No tab with id: 1." };
+      return { id: msg.tabId, url: "https://example.com/", windowId: 1 };
+    }
+    if (msg.action === "closeTab") { closed.push(msg.tabId); return { ok: true }; }
+    if (msg.action === "newHarnessTab") return { tabId: 9, windowId: 1 };
+    if (msg.action === "windows") return [];
+    return null;
+  });
+  t.after(() => ext.close());
+
+  fs.mkdirSync(path.join(home, ".pilot"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".pilot", "session.json"), JSON.stringify({
+    dead: { tabId: 1, profile: "work", lastUsed: Date.now() },
+    ancient: { tabId: 2, profile: "work", lastUsed: Date.now() - 25 * 3600000 },
+    recent: { tabId: 3, profile: "work", lastUsed: Date.now() },
+    otherProfile: { tabId: 4, profile: "home", lastUsed: Date.now() - 25 * 3600000 },
+  }));
+
+  const out = await runCli(['{"action":"claim"}', "--session", "fresh", "--profile", "work", "--no-reuse"], home, port);
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.pruned.dropped, ["dead"]);
+  assert.deepEqual(out.pruned.released, ["ancient"]);
+  assert.deepEqual(closed, [2], "only the idle tab is closed");
+  const pins = JSON.parse(fs.readFileSync(path.join(home, ".pilot", "session.json")));
+  assert.deepEqual(Object.keys(pins).sort(), ["fresh", "otherProfile", "recent"]);
 });

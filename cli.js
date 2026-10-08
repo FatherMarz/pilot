@@ -162,6 +162,39 @@ async function findAdoptable(opts) {
   return candidates[0];
 }
 
+// Prune pins on every claim: drop pins whose tab is gone, and auto-release
+// (close the tab, forget the pin) sessions idle longer than 24h. Only pins of
+// the profile we are talking to are checked; a tab counts as gone only when
+// the extension says so, never on a timeout or relay error.
+const RELEASE_IDLE_MS = 24 * 60 * 60000;
+
+async function pruneSessions(opts) {
+  const sessions = loadSessions();
+  const mine = profileKey(opts.profile);
+  const now = Date.now();
+  const dropped = [];
+  const released = [];
+  await Promise.all(Object.entries(sessions).map(async ([name, pin]) => {
+    if (!pin || pin.tabId == null || profileKey(pin.profile) !== mine) return;
+    const info = await request({ action: "tabInfo", tabId: pin.tabId }, opts).catch(() => null);
+    if (!info) return;
+    if (!info.ok) {
+      if (/no tab/i.test(String(info.error || ""))) dropped.push(name);
+      return;
+    }
+    if (name !== opts.session && now - (pin.lastUsed || 0) > RELEASE_IDLE_MS) {
+      await request({ action: "closeTab", tabId: pin.tabId }, opts).catch(() => {});
+      released.push(name);
+    }
+  }));
+  if (dropped.length || released.length) {
+    const fresh = loadSessions();
+    for (const n of [...dropped, ...released]) delete fresh[n];
+    saveSessions(fresh);
+  }
+  return { dropped, released };
+}
+
 // If idle sessions are piling up, say so and name the exact cleanup command.
 function gcHint(opts) {
   const sessions = loadSessions();
@@ -323,13 +356,15 @@ async function run(cmd, opts) {
 
   // ── claim: get or create a dedicated tab and pin it ───────────────────────
   if (cmd.action === "claim") {
+    const pruned = await pruneSessions(opts);
+    const prunedNote = pruned.dropped.length || pruned.released.length ? { pruned } : {};
     const existing = getSession(opts.session);
     if (existing && existing.tabId != null) {
       // Verify the pinned tab still exists before reusing it.
       const info = await request({ action: "tabInfo", tabId: existing.tabId }, opts);
       if (info.ok && info.value) {
         touchSession(opts.session);
-        console.log(JSON.stringify({ ok: true, session: opts.session, tabId: existing.tabId, windowId: info.value.windowId ?? null, url: info.value.url, reused: true, ...(gcHint(opts) ? { hint: gcHint(opts) } : {}) }, null, 1));
+        console.log(JSON.stringify({ ok: true, session: opts.session, tabId: existing.tabId, windowId: info.value.windowId ?? null, url: info.value.url, reused: true, ...prunedNote, ...(gcHint(opts) ? { hint: gcHint(opts) } : {}) }, null, 1));
         return;
       }
     }
@@ -352,7 +387,7 @@ async function run(cmd, opts) {
       process.exit(1);
     }
     setSession(opts.session, { tabId: created.value.tabId, url: null, windowId: created.value.windowId ?? null, profile: opts.profile || null });
-    console.log(JSON.stringify({ ok: true, session: opts.session, tabId: created.value.tabId, windowId: created.value.windowId ?? null, profile: opts.profile || null, reused: false, ...(gcHint(opts) ? { hint: gcHint(opts) } : {}) }, null, 1));
+    console.log(JSON.stringify({ ok: true, session: opts.session, tabId: created.value.tabId, windowId: created.value.windowId ?? null, profile: opts.profile || null, reused: false, ...prunedNote, ...(gcHint(opts) ? { hint: gcHint(opts) } : {}) }, null, 1));
     return;
   }
 
