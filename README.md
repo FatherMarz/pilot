@@ -17,23 +17,23 @@ screenshot text without an API key.
 
 ## Trusted input
 
-Clicks and keys go through the Chrome debugger (`Input.dispatch*`), so pages
-receive real user input: `event.isTrusted === true`, default actions run,
-same as a human click. Element targeting stays semantic — `clickN`/`clickText`
-resolve the element, scroll it into view, and the debugger clicks its center —
-so a shifted layout cannot make it miss.
+Clicks, keys and typing go through the Chrome debugger (`Input.dispatch*`,
+`Input.insertText`), so pages receive real user input: `event.isTrusted === true`,
+default actions run, and React/Angular forms see the change. Element targeting
+stays semantic: `ref`/`clickN`/`clickText` resolve the element, scroll it into
+view, and the debugger clicks its center.
 
-Pilot does not steal focus. Debugger input needs the tab rendered (active in its
-window), so:
+Pilot never activates, focuses or switches to a tab. It drives a **background
+tab**, even one in the window you are working in. The debugger attaches once per
+tab and stays attached until the tab closes (no infobar flashing between
+actions), with focus emulation on so the background page behaves as if focused.
+Each action checks that the page actually received the input; only if it did
+not does Pilot fall back to simulated events.
 
-- Tab in an **unfocused window** (the usual dedicated agent window) → Pilot
-  activates it there and clicks trusted. Your focus is untouched.
-- Tab in the **window you are working in** → it stays a background tab and
-  gets simulated events instead (those work fine unfocused).
-- Debugger taken, or element covered by an overlay → simulated events.
-
-Every reply's `via` field says which path ran: `cdp`, `synthetic-background`,
-`synthetic-covered`, or `synthetic-fallback`.
+Every reply's `via` field says which path ran: `cdp`, `synthetic-covered`
+(element under an overlay), `synthetic-select` (`<select>` fill),
+`synthetic-fallback` (debugger unavailable or input did not land), or
+`synthetic` (trusted input turned off).
 
 Hover-revealed controls (a "..." that only appears on mouseenter) are handled
 automatically: a trusted click first glides the mouse onto the element, lets the

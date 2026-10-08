@@ -6,21 +6,22 @@
 //   - Auto-connect (default on): the worker dials the relay on start, so the
 //     bridge survives reboots and reloads. Disconnect in the popup stops it
 //     for the session; the Options page can turn auto-connect off entirely.
-//   - Background-tab friendly. Commands run via chrome.scripting.executeScript,
-//     which works on inactive tabs, so the harness can drive a tab while the
-//     user works elsewhere. We only bring the tab forward when the
-//     "focusOnAction" setting is on (off by default).
+//   - Background-tab only. Reads run via chrome.scripting.executeScript and
+//     input via the Chrome debugger, both of which work on inactive tabs, so
+//     the harness drives a tab while the user works in another tab of the
+//     same window. Pilot never activates, focuses or switches to a tab.
 //   - Screenshots: active-tab captures use chrome.tabs.captureVisibleTab (no
 //     infobar); background-tab captures use the Chrome DevTools Protocol, which
 //     photographs any tab without touching focus. Images are downscaled in the
 //     worker so they stay small enough for the harness to read.
+
+importScripts("keys.js");
 
 const DEFAULT_SETTINGS = {
   relayUrl: "ws://127.0.0.1:8756",
   profileName: "default",
   groupName: "Harness",
   groupColor: "red",
-  focusOnAction: false,
   visualFeedback: true,
   shotMaxWidth: 1280,
   shotFormat: "jpeg", // "jpeg" | "png"
@@ -67,714 +68,6 @@ function currentState() {
   };
 }
 
-// ── page functions (run in the tab's isolated world; no eval, CSP-safe) ─────
-// ONE self-contained function per injection: Chrome serializes the function
-// body into the page but NOT the helpers it references, so every helper is
-// inlined. Visual feedback: a soft glow around the tab edge + a cursor arrow
-// at the last interaction point.
-function actFunc(mode, a, b, c, d) {
-  const base = "cb-bridge-";
-  // Last arg: whether to draw the glow + cursor. Off for clean recordings.
-  const showFeedback = d !== false;
-  const ensureArm = () => {
-    let cursor = document.getElementById(base + "cursor");
-    if (!cursor) {
-      cursor = document.createElement("div");
-      cursor.id = base + "cursor";
-      cursor.style.cssText =
-        "position:fixed;left:0;top:0;width:22px;height:22px;pointer-events:none;z-index:2147483647;display:none;";
-      cursor.innerHTML =
-        '<svg width="22" height="22" viewBox="0 0 24 24" style="filter:drop-shadow(0 1px 3px rgba(0,0,0,0.8))"><path d="M4 2l16 9.5-6.8 1.6L9 20.5z" fill="#fff" stroke="#c00" stroke-width="1.6" stroke-linejoin="round"/></svg>';
-      document.documentElement.appendChild(cursor);
-    }
-    let glow = document.getElementById(base + "glow");
-    if (!glow) {
-      glow = document.createElement("div");
-      glow.id = base + "glow";
-      glow.style.cssText =
-        "position:fixed;inset:0;pointer-events:none;z-index:2147483646;box-sizing:border-box;" +
-        "border:3px solid rgba(255,110,110,0.55);" +
-        "box-shadow:inset 0 0 48px 14px rgba(255,90,90,0.26), 0 0 40px 8px rgba(255,90,90,0.35);";
-      document.documentElement.appendChild(glow);
-    }
-    return cursor;
-  };
-  const pointAt = (el) => {
-    const r = el.getBoundingClientRect();
-    const x = Math.round(r.x + r.width / 2);
-    const y = Math.round(r.y + r.height / 2);
-    if (showFeedback) {
-      const cursor = ensureArm();
-      cursor.style.left = x + "px";
-      cursor.style.top = y + "px";
-      cursor.style.display = "block";
-    }
-    return { x, y };
-  };
-  const fireClick = (el, x, y) => {
-    const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
-    el.dispatchEvent(new PointerEvent("pointerdown", opts));
-    el.dispatchEvent(new PointerEvent("pointerup", opts));
-    for (const type of ["mousedown", "mouseup", "click"]) {
-      el.dispatchEvent(new MouseEvent(type, opts));
-    }
-  };
-
-  // Every mode returns a plain object: { ok:true, ... } on success and
-  // { ok:false, error, ...recovery data } on failure, so a driving model can
-  // branch on `ok` instead of parsing prose.
-  const clickables = () => [...document.querySelectorAll(
-    "button, a, input, textarea, select, [role=button], [role=checkbox], [role=link], [role=tab], [onclick], label, span, div, li")];
-  const labelOf = (el) =>
-    (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.title || "").trim();
-  // For a radio/checkbox (or its label), the checked state after a click —
-  // lets the model confirm a toggle from the click result alone.
-  const checkedOf = (el) => {
-    const input = el.tagName === "INPUT" ? el : (el.control || (el.querySelector && el.querySelector("input")) || null);
-    return input && (input.type === "radio" || input.type === "checkbox") ? input.checked : undefined;
-  };
-  const visibleTexts = () => {
-    const seen = new Set();
-    const out = [];
-    for (const el of clickables()) {
-      const r = el.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) continue;
-      const t = labelOf(el).slice(0, 50);
-      if (!t || t.length > 50 || seen.has(t) || el.children.length > 3) continue;
-      seen.add(t);
-      out.push(t);
-      if (out.length >= 15) break;
-    }
-    return out;
-  };
-
-  if (mode === "hrefs") {
-    return [...document.querySelectorAll("a[href]")]
-      .map((x) => ({ text: (x.innerText || "").trim().slice(0, 40), href: x.getAttribute("href") }))
-      .filter((x) => !a || x.text.toLowerCase().includes(a.toLowerCase()) || x.href.toLowerCase().includes(a.toLowerCase()))
-      .slice(0, 10);
-  }
-  if (mode === "clickXY") {
-    const el = document.elementFromPoint(a, b);
-    if (!el) return { ok: false, error: "no element at " + a + "," + b, hint: "coordinates are viewport pixels; run snap for fresh ones" };
-    const p = pointAt(el);
-    fireClick(el, p.x, p.y);
-    return { ok: true, clicked: el.tagName.toLowerCase(), text: labelOf(el).slice(0, 50), x: a, y: b };
-  }
-  if (mode === "hoverXY") {
-    const el = document.elementFromPoint(a, b);
-    if (!el) return { ok: false, error: "no element at " + a + "," + b, hint: "coordinates are viewport pixels; run snap for fresh ones" };
-    pointAt(el);
-    const opts = { bubbles: true, cancelable: true, clientX: a, clientY: b, view: window };
-    el.dispatchEvent(new MouseEvent("mouseover", opts));
-    el.dispatchEvent(new MouseEvent("mousemove", opts));
-    try { el.dispatchEvent(new MouseEvent("mouseenter", opts)); } catch { /* React reads mouseover */ }
-    return { ok: true, hovered: el.tagName.toLowerCase(), text: labelOf(el).slice(0, 50), x: a, y: b, via: "synthetic" };
-  }
-  if (mode === "tail") {
-    const text = (document.body && document.body.innerText || "");
-    return text.slice(-3000);
-  }
-  if (mode === "read") {
-    // Long-form page text for read-heavy tasks; snap caps at 3000 chars.
-    const text = (document.body && document.body.innerText || "");
-    const offset = Number(a) || 0;
-    return { ok: true, length: text.length, offset, text: text.slice(offset, offset + 12000) };
-  }
-  if (mode === "key") {
-    const target = document.activeElement || document.body;
-    const opts = { key: a, code: a, bubbles: true, cancelable: true };
-    if (b) opts.metaKey = true;
-    if (c) opts.shiftKey = true;
-    if (a === "Enter" || a === " " || a === "Tab") opts.keyCode = a === "Enter" ? 13 : a === "Tab" ? 9 : 32;
-    target.dispatchEvent(new KeyboardEvent("keydown", opts));
-    target.dispatchEvent(new KeyboardEvent("keyup", opts));
-    return "key: " + a + (b ? " (meta)" : "") + (c ? " (shift)" : "") + " on " + target.tagName;
-  }
-  if (mode === "click") {
-    const el = a && document.querySelector(a);
-    if (!el) {
-      return { ok: false, error: "no element matches selector '" + a + "'", visibleTexts: visibleTexts(), hint: "click by text instead: {\"action\":\"clickText\",\"text\":\"...\"} or by number after a snap: {\"action\":\"clickN\",\"n\":3}" };
-    }
-    const p = pointAt(el);
-    fireClick(el, p.x, p.y);
-    return { ok: true, clicked: a, text: labelOf(el).slice(0, 50), x: p.x, y: p.y };
-  }
-  if (mode === "clickText") {
-    // Forgiving match, tightest tier wins: exact -> case-insensitive exact ->
-    // startsWith -> ci startsWith -> ci contains. Within a tier prefer real
-    // controls over wrappers, then the SHORTEST text (the leaf, not the page).
-    const want = String(a);
-    const wantLc = want.toLowerCase();
-    const rank = (el) => {
-      const t = (el.innerText || "").trim();
-      const tLc = t.toLowerCase();
-      if (t === want) return 0;
-      if (c) return 99; // exact:true accepts tier 0 only
-      if (tLc === wantLc) return 1;
-      if (t.startsWith(want)) return 2;
-      if (tLc.startsWith(wantLc)) return 3;
-      if (tLc.includes(wantLc)) return 4;
-      return 99;
-    };
-    const control = (el) => /^(button|a|input|select|textarea|label)$/i.test(el.tagName) || el.getAttribute("role") ? 0 : 1;
-    let best = null;
-    for (const el of clickables()) {
-      const r = el.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) continue;
-      const tier = rank(el);
-      if (tier === 99) continue;
-      const len = (el.innerText || "").trim().length;
-      const score = [tier, control(el), len];
-      if (!best || score[0] < best.score[0] ||
-          (score[0] === best.score[0] && (score[1] < best.score[1] ||
-          (score[1] === best.score[1] && score[2] < best.score[2])))) {
-        best = { el, score };
-      }
-    }
-    if (!best) {
-      return { ok: false, error: "no clickable element with text '" + want + "'" + (c ? " (exact)" : ""), visibleTexts: visibleTexts(), hint: "pick one of visibleTexts, or snap and use clickN" };
-    }
-    const p = pointAt(best.el);
-    fireClick(best.el, p.x, p.y);
-    const chk = checkedOf(best.el);
-    return { ok: true, clicked: labelOf(best.el).slice(0, 50), tag: best.el.tagName.toLowerCase(), x: p.x, y: p.y, match: ["exact", "exact-ci", "starts", "starts-ci", "contains-ci"][best.score[0]], ...(chk !== undefined ? { checkedNow: chk } : {}) };
-  }
-  if (mode === "clickN") {
-    // Click item N from the most recent snap: SAME collector, SAME order.
-    const items = [...document.querySelectorAll("button, a, input, textarea, select, [role=dialog], [role=checkbox], label")]
-      .map((el) => {
-        const r = el.getBoundingClientRect();
-        const text = labelOf(el).slice(0, 70);
-        const icon = el.tagName === "BUTTON" && !(el.innerText || "").trim() ? "icon-btn" : "";
-        return { el, visible: r.width > 0 && r.height > 0, text, icon };
-      })
-      .filter((i) => i.visible && (i.text || i.icon))
-      .slice(0, 120);
-    const item = items[a];
-    if (!item) return { ok: false, error: "no item " + a + " (snap listed " + items.length + " items)", hint: "snap again — the page changed" };
-    const p = pointAt(item.el);
-    fireClick(item.el, p.x, p.y);
-    const chk = checkedOf(item.el);
-    return { ok: true, clicked: item.text || item.icon, n: a, x: p.x, y: p.y, ...(chk !== undefined ? { checkedNow: chk } : {}) };
-  }
-  // Frameworks (React, Angular, Vue) track input state off their own value
-  // tracker or (input)/(change) listeners, not off the raw DOM property. A
-  // direct `.value =` assignment is invisible to them — the field LOOKS
-  // filled but the model behind it stays empty. The fix has three parts:
-  //   1. Write through the native prototype setter (bypasses React's patched
-  //      setter, which would otherwise swallow the same-value check).
-  //   2. Fire keydown/input/keyup/change, all bubbling, so whichever event
-  //      the framework listens on (Angular reactive forms use (input); some
-  //      slug/derive-field logic hooks keyup) actually sees the change.
-  //   3. Fire blur/focusout WITHOUT moving real focus, so blur-triggered
-  //      validation runs — but document.activeElement stays put, because
-  //      `{"action":"type"}` then `{"action":"key","key":"Enter"}` (see
-  //      README) depends on the field still being the active element.
-  const fireValueEvents = (el, text) => {
-    const opts = { bubbles: true, cancelable: true };
-    el.dispatchEvent(new KeyboardEvent("keydown", opts));
-    try {
-      el.dispatchEvent(new InputEvent("input", { ...opts, inputType: "insertText", data: text }));
-    } catch {
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    el.dispatchEvent(new KeyboardEvent("keyup", opts));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
-  };
-  if (mode === "type" || mode === "replace") {
-    const all = [...document.querySelectorAll('[contenteditable="true"], textarea, input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])')];
-    const el = (a && document.querySelector(a)) || all.find((e) => e.offsetParent !== null);
-    if (!el) {
-      return { ok: false, error: a ? "no field matches selector '" + a + "'" : "no visible text field on the page", fields: all.slice(0, 10).map((e) => ({ tag: e.tagName.toLowerCase(), name: e.name || null, placeholder: e.placeholder || null })), hint: "run {\"action\":\"form\"} to see every field" };
-    }
-    pointAt(el);
-    el.focus();
-    let via;
-    if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
-      const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(proto, "value").set.call(el, b);
-      fireValueEvents(el, b);
-      via = "value";
-    } else if (el.isContentEditable) {
-      if (mode === "replace") document.execCommand("selectAll", false, null);
-      const ok = document.execCommand("insertText", false, b);
-      if (!ok) {
-        el.textContent = b;
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      via = "insertText:" + ok;
-    } else {
-      via = "none";
-    }
-    return { ok: true, typed: b.length + " chars", into: el.tagName.toLowerCase() + (el.name ? "[name=" + el.name + "]" : ""), via, valueNow: (el.value ?? el.innerText ?? "").slice(0, 60) };
-  }
-  if (mode === "typeKeys") {
-    // Value-set + input event still isn't enough for some fields — masked or
-    // per-keystroke-transformed inputs (card numbers, phone formatting) that
-    // read from the actual keystroke stream. This drives one real
-    // keydown/keypress/input/keyup cycle per character instead of one bulk set.
-    const all = [...document.querySelectorAll('[contenteditable="true"], textarea, input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])')];
-    const el = (a && document.querySelector(a)) || all.find((e) => e.offsetParent !== null);
-    if (!el) {
-      return { ok: false, error: a ? "no field matches selector '" + a + "'" : "no visible text field on the page", fields: all.slice(0, 10).map((e) => ({ tag: e.tagName.toLowerCase(), name: e.name || null, placeholder: e.placeholder || null })), hint: "run {\"action\":\"form\"} to see every field" };
-    }
-    pointAt(el);
-    el.focus();
-    const isNative = el.tagName === "TEXTAREA" || el.tagName === "INPUT";
-    const setter = isNative
-      ? Object.getOwnPropertyDescriptor(el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype, "value").set
-      : null;
-    if (isNative) setter.call(el, "");
-    else if (el.isContentEditable) { document.execCommand("selectAll", false, null); document.execCommand("delete", false, null); }
-    const text = String(b);
-    for (const ch of text) {
-      const opts = { key: ch, bubbles: true, cancelable: true };
-      el.dispatchEvent(new KeyboardEvent("keydown", opts));
-      el.dispatchEvent(new KeyboardEvent("keypress", opts));
-      if (isNative) {
-        setter.call(el, el.value + ch);
-        try {
-          el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, inputType: "insertText", data: ch }));
-        } catch {
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-      } else if (el.isContentEditable) {
-        document.execCommand("insertText", false, ch);
-      }
-      el.dispatchEvent(new KeyboardEvent("keyup", opts));
-    }
-    if (isNative) el.dispatchEvent(new Event("change", { bubbles: true }));
-    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
-    return { ok: true, typed: text.length + " chars (keystrokes)", into: el.tagName.toLowerCase() + (el.name ? "[name=" + el.name + "]" : ""), via: "keys", valueNow: (el.value ?? el.innerText ?? "").slice(0, 60) };
-  }
-  return { ok: false, error: "unknown mode " + mode };
-}
-
-// ── trusted-input support ───────────────────────────────────────────────────
-// locateFunc resolves the SAME element the synthetic modes would (identical
-// matching logic), scrolls it into view, and reports its viewport center so
-// the debugger can click it with a real, trusted mouse event. If the center
-// is covered by something else (sticky header, overlay), it clicks
-// synthetically right here and returns a final result instead — a covered
-// element can still receive dispatched events, but not a coordinate click.
-function locateFunc(mode, a, c, showFeedback) {
-  const base = "cb-bridge-";
-  const ensureArm = () => {
-    let cursor = document.getElementById(base + "cursor");
-    if (!cursor) {
-      cursor = document.createElement("div");
-      cursor.id = base + "cursor";
-      cursor.style.cssText =
-        "position:fixed;left:0;top:0;width:22px;height:22px;pointer-events:none;z-index:2147483647;display:none;";
-      cursor.innerHTML =
-        '<svg width="22" height="22" viewBox="0 0 24 24" style="filter:drop-shadow(0 1px 3px rgba(0,0,0,0.8))"><path d="M4 2l16 9.5-6.8 1.6L9 20.5z" fill="#fff" stroke="#c00" stroke-width="1.6" stroke-linejoin="round"/></svg>';
-      document.documentElement.appendChild(cursor);
-    }
-    return cursor;
-  };
-  const labelOf = (el) =>
-    (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.title || "").trim();
-  const clickables = () => [...document.querySelectorAll(
-    "button, a, input, textarea, select, [role=button], [role=checkbox], [role=link], [role=tab], [onclick], label, span, div, li")];
-  const visibleTexts = () => {
-    const seen = new Set();
-    const out = [];
-    for (const el of clickables()) {
-      const r = el.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) continue;
-      const t = labelOf(el).slice(0, 50);
-      if (!t || t.length > 50 || seen.has(t) || el.children.length > 3) continue;
-      seen.add(t);
-      out.push(t);
-      if (out.length >= 15) break;
-    }
-    return out;
-  };
-  const fireClick = (el, x, y) => {
-    const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
-    el.dispatchEvent(new PointerEvent("pointerdown", opts));
-    el.dispatchEvent(new PointerEvent("pointerup", opts));
-    for (const type of ["mousedown", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, opts));
-  };
-  const checkedOf = (el) => {
-    const input = el.tagName === "INPUT" ? el : (el.control || (el.querySelector && el.querySelector("input")) || null);
-    return input && (input.type === "radio" || input.type === "checkbox") ? input.checked : undefined;
-  };
-
-  // Resolve the target with the same logic as the synthetic modes.
-  let el = null;
-  let meta = {};
-  if (mode === "click") {
-    el = a && document.querySelector(a);
-    if (!el) return { ok: false, error: "no element matches selector '" + a + "'", visibleTexts: visibleTexts(), hint: "click by text instead: {\"action\":\"clickText\",\"text\":\"...\"} or by number after a snap: {\"action\":\"clickN\",\"n\":3}" };
-    meta = { clicked: a, text: labelOf(el).slice(0, 50) };
-  } else if (mode === "clickText") {
-    const want = String(a);
-    const wantLc = want.toLowerCase();
-    const rank = (x) => {
-      const t = (x.innerText || "").trim();
-      const tLc = t.toLowerCase();
-      if (t === want) return 0;
-      if (c) return 99;
-      if (tLc === wantLc) return 1;
-      if (t.startsWith(want)) return 2;
-      if (tLc.startsWith(wantLc)) return 3;
-      if (tLc.includes(wantLc)) return 4;
-      return 99;
-    };
-    const control = (x) => /^(button|a|input|select|textarea|label)$/i.test(x.tagName) || x.getAttribute("role") ? 0 : 1;
-    let best = null;
-    for (const cand of clickables()) {
-      const r = cand.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) continue;
-      const tier = rank(cand);
-      if (tier === 99) continue;
-      const len = (cand.innerText || "").trim().length;
-      const score = [tier, control(cand), len];
-      if (!best || score[0] < best.score[0] ||
-          (score[0] === best.score[0] && (score[1] < best.score[1] ||
-          (score[1] === best.score[1] && score[2] < best.score[2])))) {
-        best = { el: cand, score };
-      }
-    }
-    if (!best) return { ok: false, error: "no clickable element with text '" + want + "'" + (c ? " (exact)" : ""), visibleTexts: visibleTexts(), hint: "pick one of visibleTexts, or snap and use clickN" };
-    el = best.el;
-    meta = { clicked: labelOf(el).slice(0, 50), tag: el.tagName.toLowerCase(), match: ["exact", "exact-ci", "starts", "starts-ci", "contains-ci"][best.score[0]] };
-  } else if (mode === "clickN") {
-    const items = [...document.querySelectorAll("button, a, input, textarea, select, [role=dialog], [role=checkbox], label")]
-      .map((x) => {
-        const r = x.getBoundingClientRect();
-        const text = labelOf(x).slice(0, 70);
-        const icon = x.tagName === "BUTTON" && !(x.innerText || "").trim() ? "icon-btn" : "";
-        return { el: x, visible: r.width > 0 && r.height > 0, text, icon };
-      })
-      .filter((i) => i.visible && (i.text || i.icon))
-      .slice(0, 120);
-    const item = items[a];
-    if (!item) return { ok: false, error: "no item " + a + " (snap listed " + items.length + " items)", hint: "snap again — the page changed" };
-    el = item.el;
-    meta = { clicked: item.text || item.icon, n: a };
-  } else {
-    return { ok: false, error: "locate: unknown mode " + mode };
-  }
-
-  // Bring it into view, then check the center actually hits it.
-  const r0 = el.getBoundingClientRect();
-  if (r0.top < 0 || r0.bottom > innerHeight || r0.left < 0 || r0.right > innerWidth) {
-    el.scrollIntoView({ block: "center", inline: "center" });
-  }
-  const r = el.getBoundingClientRect();
-  const x = Math.round(r.x + r.width / 2);
-  const y = Math.round(r.y + r.height / 2);
-  if (showFeedback !== false) {
-    const cursor = ensureArm();
-    cursor.style.left = x + "px";
-    cursor.style.top = y + "px";
-    cursor.style.display = "block";
-  }
-  const hit = document.elementFromPoint(x, y);
-  const reachable = hit && (hit === el || el.contains(hit) || hit.contains(el) ||
-    (el.control && (hit === el.control || el.control.contains(hit))));
-  if (!reachable) {
-    // Covered — a coordinate click would hit the overlay, so click in place.
-    fireClick(el, x, y);
-    const chk = checkedOf(el);
-    return { ok: true, ...meta, x, y, via: "synthetic-covered", ...(chk !== undefined ? { checkedNow: chk } : {}) };
-  }
-  for (const old of document.querySelectorAll("[data-pilot-t]")) old.removeAttribute("data-pilot-t");
-  el.setAttribute("data-pilot-t", "1");
-  return { needsCdp: true, x, y, result: { ok: true, ...meta, x, y } };
-}
-
-// After a trusted click: read back toggle state from the tagged element.
-function confirmClickFunc() {
-  const el = document.querySelector("[data-pilot-t]");
-  if (!el) return {};
-  el.removeAttribute("data-pilot-t");
-  const input = el.tagName === "INPUT" ? el : (el.control || (el.querySelector && el.querySelector("input")) || null);
-  if (input && (input.type === "radio" || input.type === "checkbox")) return { checkedNow: input.checked };
-  return {};
-}
-
-// After a hover-only move, re-read the tagged element's center. Hover-revealed
-// controls can slide into place on mouseenter, so the pre-hover center is
-// stale — this returns the post-hover one. Tag stays put for confirmClickFunc.
-function remeasureFunc() {
-  const el = document.querySelector("[data-pilot-t]");
-  if (!el) return null;
-  const r = el.getBoundingClientRect();
-  return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
-}
-
-// Resolve an element the same way clickText/clickN/click do, but only to
-// report its center for a hover move — no click, no coverage fallback (a hover
-// can land on anything). Tags the element so remeasureFunc can re-read it.
-function hoverFunc(mode, a, c) {
-  const labelOf = (el) =>
-    (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.title || "").trim();
-  let el = null;
-  let meta = {};
-  if (mode === "sel") {
-    el = a && document.querySelector(a);
-    if (!el) return { ok: false, error: "no element matches selector '" + a + "'", hint: "use hoverXY with viewport coordinates instead" };
-    meta = { text: labelOf(el).slice(0, 50) };
-  } else if (mode === "text") {
-    const want = String(a);
-    const wantLc = want.toLowerCase();
-    const rank = (x) => {
-      const t = (x.innerText || "").trim();
-      const tLc = t.toLowerCase();
-      if (t === want) return 0;
-      if (c) return 99;
-      if (tLc === wantLc) return 1;
-      if (t.startsWith(want)) return 2;
-      if (tLc.startsWith(wantLc)) return 3;
-      if (tLc.includes(wantLc)) return 4;
-      return 99;
-    };
-    const control = (x) => /^(button|a|input|select|textarea|label)$/i.test(x.tagName) || x.getAttribute("role") ? 0 : 1;
-    let best = null;
-    for (const cand of document.querySelectorAll("button, a, input, textarea, select, [role=button], [role=checkbox], [role=link], [role=tab], [onclick], label, span, div, li")) {
-      const r = cand.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) continue;
-      const tier = rank(cand);
-      if (tier === 99) continue;
-      const len = (cand.innerText || "").trim().length;
-      const score = [tier, control(cand), len];
-      if (!best || score[0] < best.score[0] ||
-          (score[0] === best.score[0] && (score[1] < best.score[1] ||
-          (score[1] === best.score[1] && score[2] < best.score[2])))) {
-        best = { el: cand, score };
-      }
-    }
-    if (!best) return { ok: false, error: "no element with text '" + want + "'", hint: "use hoverXY with viewport coordinates instead" };
-    el = best.el;
-    meta = { text: labelOf(el).slice(0, 50) };
-  } else if (mode === "n") {
-    const items = [...document.querySelectorAll("button, a, input, textarea, select, [role=dialog], [role=checkbox], label")]
-      .map((x) => {
-        const r = x.getBoundingClientRect();
-        const text = labelOf(x).slice(0, 70);
-        const icon = x.tagName === "BUTTON" && !(x.innerText || "").trim() ? "icon-btn" : "";
-        return { el: x, visible: r.width > 0 && r.height > 0, text, icon };
-      })
-      .filter((i) => i.visible && (i.text || i.icon))
-      .slice(0, 120);
-    const item = items[Number(a)];
-    if (!item) return { ok: false, error: "no item " + a, hint: "snap again — the page changed" };
-    el = item.el;
-    meta = { text: item.text || item.icon, n: Number(a) };
-  } else {
-    return { ok: false, error: "hover needs one of: n, text, sel, or x+y (use hoverXY)" };
-  }
-  el.scrollIntoView({ block: "center", inline: "center" });
-  const r = el.getBoundingClientRect();
-  const x = Math.round(r.x + r.width / 2);
-  const y = Math.round(r.y + r.height / 2);
-  for (const old of document.querySelectorAll("[data-pilot-t]")) old.removeAttribute("data-pilot-t");
-  el.setAttribute("data-pilot-t", "1");
-  return { ok: true, ...meta, x, y };
-}
-
-// Focus a field (same resolution as type/typeKeys) so trusted keystrokes from
-// the debugger land in it. Clears it first — typeKeys semantics.
-function focusFieldFunc(sel) {
-  const all = [...document.querySelectorAll('[contenteditable="true"], textarea, input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])')];
-  const el = (sel && document.querySelector(sel)) || all.find((e) => e.offsetParent !== null);
-  if (!el) {
-    return { ok: false, error: sel ? "no field matches selector '" + sel + "'" : "no visible text field on the page", fields: all.slice(0, 10).map((e) => ({ tag: e.tagName.toLowerCase(), name: e.name || null, placeholder: e.placeholder || null })), hint: "run {\"action\":\"form\"} to see every field" };
-  }
-  el.scrollIntoView({ block: "center" });
-  el.focus();
-  if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
-    const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-    Object.getOwnPropertyDescriptor(proto, "value").set.call(el, "");
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-  } else if (el.isContentEditable) {
-    document.execCommand("selectAll", false, null);
-    document.execCommand("delete", false, null);
-  }
-  for (const old of document.querySelectorAll("[data-pilot-t]")) old.removeAttribute("data-pilot-t");
-  el.setAttribute("data-pilot-t", "1");
-  return { ok: true, into: el.tagName.toLowerCase() + (el.name ? "[name=" + el.name + "]" : "") };
-}
-
-// Read the tagged field's value after trusted typing.
-function fieldValueFunc() {
-  const el = document.querySelector("[data-pilot-t]");
-  if (!el) return { valueNow: "" };
-  el.removeAttribute("data-pilot-t");
-  return { valueNow: String(el.value ?? el.innerText ?? "").slice(0, 60) };
-}
-
-function snapFunc() {
-  const out = { title: document.title, url: location.href };
-  out.text = (document.body && document.body.innerText || "").slice(0, 3000);
-  // Items carry `n`: {"action":"clickN","n":3} clicks item 3 of THIS list.
-  // clickN rebuilds the list with the same collector, so n stays stable as
-  // long as the page has not changed.
-  out.items = [...document.querySelectorAll("button, a, input, textarea, select, [role=dialog], [role=checkbox], label")]
-    .map((el) => {
-      const r = el.getBoundingClientRect();
-      const isToggle = el.tagName === "INPUT" && (el.type === "radio" || el.type === "checkbox");
-      return {
-        tag: el.tagName.toLowerCase(),
-        text: (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.title || "").trim().slice(0, 70),
-        icon: el.tagName === "BUTTON" && !(el.innerText || "").trim() ? "icon-btn" : "",
-        visible: r.width > 0 && r.height > 0,
-        x: Math.round(r.x + r.width / 2),
-        y: Math.round(r.y + r.height / 2),
-        w: Math.round(r.width),
-        ...(isToggle ? { type: el.type, checked: el.checked } : {}),
-      };
-    })
-    .filter((i) => i.visible && (i.text || i.icon))
-    .slice(0, 120)
-    .map((i, n) => ({ n, ...i }));
-  out.hint = "click an item with {\"action\":\"clickN\",\"n\":<n>} or {\"action\":\"clickText\",\"text\":\"...\"}";
-  return out;
-}
-function findTextFunc(text) {
-  const want = String(text);
-  const wantLc = want.toLowerCase();
-  const pass = (fn) => {
-    const out = [];
-    for (const el of document.querySelectorAll("button, a, span, div, li, p, h1, h2, h3, h4, td, th, label, legend, dt, dd, [role=button], [role=link], [role=tab]")) {
-      const r = el.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) continue;
-      const t = (el.innerText || "").trim();
-      if (fn(t) && el.children.length <= 4) {
-        out.push({ tag: el.tagName.toLowerCase(), role: el.getAttribute("role"), text: t.slice(0, 60), x: Math.round(r.x), y: Math.round(r.y) });
-      }
-      if (out.length >= 10) break;
-    }
-    return out;
-  };
-  // Strict first, then forgiving — a small model's typo in case still lands.
-  let out = pass((t) => t.startsWith(want));
-  if (!out.length) out = pass((t) => t.toLowerCase().includes(wantLc));
-  return out;
-}
-function fillFunc(sel, value) {
-  // Same framework-visibility problem as type/replace: a raw `.value =` (or
-  // even the native setter alone) is invisible to React/Angular/Vue unless
-  // the events they listen on also fire. See actFunc's fireValueEvents for
-  // the full rationale; this is the same fix, duplicated because Chrome
-  // serializes each injected function standalone (no shared module scope).
-  const setNative = (el, v) => {
-    const proto = el.tagName === "SELECT" ? window.HTMLSelectElement.prototype :
-      el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-    Object.getOwnPropertyDescriptor(proto, "value").set.call(el, v);
-  };
-  const fireEvents = (el) => {
-    if (el.tagName === "SELECT") {
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      return;
-    }
-    const opts = { bubbles: true, cancelable: true };
-    el.dispatchEvent(new KeyboardEvent("keydown", opts));
-    try {
-      el.dispatchEvent(new InputEvent("input", { ...opts, inputType: "insertText", data: String(el.value) }));
-    } catch {
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    el.dispatchEvent(new KeyboardEvent("keyup", opts));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
-  };
-  const el = sel && document.querySelector(sel);
-  if (!el) {
-    const fields = [...document.querySelectorAll("input:not([type=hidden]), select, textarea")]
-      .slice(0, 12)
-      .map((e) => ({ tag: e.tagName.toLowerCase(), name: e.name || null, id: e.id || null, placeholder: e.placeholder || null }));
-    return { ok: false, error: "no field matches selector '" + sel + "'", fields, hint: "use a name from this list, e.g. {\"action\":\"fill\",\"sel\":\"[name=email]\",\"value\":\"...\"}" };
-  }
-  el.focus();
-  setNative(el, value);
-  fireEvents(el);
-  if (el.tagName === "SELECT" && el.value !== value) {
-    // Value didn't stick — the option value is different from the label.
-    const options = [...el.options].map((o) => ({ value: o.value, label: o.innerText.trim() }));
-    const byLabel = options.find((o) => o.label.toLowerCase() === String(value).toLowerCase());
-    if (byLabel) {
-      setNative(el, byLabel.value);
-      fireEvents(el);
-      return { ok: true, filled: sel, valueNow: el.value, note: "matched option by label" };
-    }
-    return { ok: false, error: "select has no option '" + value + "'", options, hint: "use one of these values" };
-  }
-  return { ok: true, filled: sel, valueNow: (el.value || "").slice(0, 60) };
-}
-// fillShadow pierces shadow roots to reach an input by a partial match on
-// name, placeholder, aria-label, or data-testid — for fields querySelector
-// cannot reach (e.g. hosted checkout widgets render inputs in shadow DOM).
-function fillShadowFunc(match, value) {
-  const wantLc = String(match || "").toLowerCase();
-  const seen = new Set();
-  const found = [];
-  const walk = (root) => {
-    for (const el of root.querySelectorAll("input, textarea, select")) {
-      const id = [el.name, el.placeholder, el.getAttribute("aria-label"), el.getAttribute("data-testid")]
-        .filter(Boolean).join("|").toLowerCase();
-      found.push(id || el.tagName.toLowerCase());
-      if (wantLc && id.includes(wantLc)) {
-        const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype :
-          el.tagName === "SELECT" ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
-        el.focus();
-        Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
-        if (el.tagName === "SELECT") {
-          el.dispatchEvent(new Event("change", { bubbles: true }));
-        } else {
-          const opts = { bubbles: true, cancelable: true };
-          el.dispatchEvent(new KeyboardEvent("keydown", opts));
-          try {
-            el.dispatchEvent(new InputEvent("input", { ...opts, inputType: "insertText", data: String(value) }));
-          } catch {
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-          }
-          el.dispatchEvent(new KeyboardEvent("keyup", opts));
-          el.dispatchEvent(new Event("change", { bubbles: true }));
-          el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
-        }
-        return { ok: true, filled: id };
-      }
-    }
-    for (const el of root.querySelectorAll("*")) {
-      if (el.shadowRoot && !seen.has(el.shadowRoot)) {
-        seen.add(el.shadowRoot);
-        const r = walk(el.shadowRoot);
-        if (r) return r;
-      }
-    }
-    return null;
-  };
-  return walk(document) || { ok: false, error: "no shadow field matches '" + match + "'", fields: [...new Set(found)].slice(0, 15), hint: "pass a substring of one of these in \"match\"" };
-}
-function dialogFunc() {
-  const d = document.querySelector("[role=dialog]");
-  return d ? d.innerText.slice(0, 2000) : null;
-}
-function formFunc() {
-  const scope = document.querySelector("[role=dialog]") || document.body;
-  if (!scope) return { ok: false, error: "page has no body yet", hint: "navigate first or wait for the page to load" };
-  return {
-    inputs: [...scope.querySelectorAll("input")].map((i) => ({
-      name: i.name, type: i.type, placeholder: i.placeholder || null,
-      value: (i.value || "").slice(0, 40), checked: i.checked,
-    })),
-    selects: [...scope.querySelectorAll("select")].map((s) => ({
-      value: s.value,
-      options: [...s.options].map((o) => o.innerText.trim() + "=" + o.value).join(" / "),
-    })),
-    radios: [...scope.querySelectorAll("[role=radiogroup], input[type=radio]")].map((r) => ({
-      text: (r.innerText || r.getAttribute("aria-label") || r.value || "").trim().slice(0, 40),
-      checked: r.checked,
-    })),
-    errors: (scope.innerText.match(/[Ee]rror[^\n]{0,100}|required[^\n]{0,100}|must[^\n]{0,100}/g) || []).slice(0, 5),
-  };
-}
 
 // ── WebSocket management ────────────────────────────────────────────────────
 
@@ -829,13 +122,117 @@ function disconnect() {
   setState("disconnected");
 }
 
-// ── Command dispatch ────────────────────────────────────────────────────────
+// ── page library calls ──────────────────────────────────────────────────────
+// page.js installs globalThis.__pilot in the tab's isolated world. Each call
+// checks it is there (and from this worker's boot, so a reloaded extension
+// never talks to a stale copy) and injects it on a miss.
 
-function shouldBringForward(action) {
-  if (!settings.focusOnAction) return false;
-  // Pure metadata actions never need focus.
-  return !["ping", "tabs", "harnessTab", "newHarnessTab", "reload", "status"].includes(action);
+const BOOT = Math.random().toString(36).slice(2);
+
+async function pageCall(tabId, name, args) {
+  const call = (boot, n, a) => {
+    const P = globalThis.__pilot;
+    if (!P || P.boot !== boot) return { __pilotMissing: true };
+    return P[n](...a);
+  };
+  const exec = async (func, a) => {
+    const rs = await chrome.scripting.executeScript({ target: { tabId }, func, args: a });
+    const r = rs && rs[0];
+    if (r && r.exceptionDetails) {
+      throw new Error((r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text);
+    }
+    return r ? r.result : undefined;
+  };
+  let res = await exec(call, [BOOT, name, args || []]);
+  if (res && res.__pilotMissing) {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["page.js"] });
+    await exec((boot) => { globalThis.__pilot.boot = boot; }, [BOOT]);
+    res = await exec(call, [BOOT, name, args || []]);
+  }
+  return res;
 }
+
+// ── trusted input via the Chrome debugger ───────────────────────────────────
+// Input.* events arrive as REAL user input (event.isTrusted === true; default
+// actions run). The debugger attaches ONCE per tab and stays attached until
+// the tab closes or Chrome detaches it, so the debugging infobar does not
+// flash and shift the page between locating an element and clicking it.
+// Focus emulation makes a background tab behave as if focused (focus events,
+// :focus, document.hasFocus()) without touching the real tab or window focus.
+// Pilot never calls tabs.update({active}) or windows.update({focused}).
+
+const dbg = new Map(); // tabId -> Promise<void> (attached + focus emulation on)
+
+chrome.debugger.onDetach.addListener((source) => {
+  if (source && source.tabId != null) dbg.delete(source.tabId);
+});
+chrome.tabs.onRemoved.addListener((tabId) => dbg.delete(tabId));
+
+function dbgAttach(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.attach({ tabId }, "1.3", () => {
+      const e = chrome.runtime.lastError;
+      if (e) reject(new Error(e.message)); else resolve();
+    });
+  });
+}
+
+function dbgDetach(tabId) {
+  return new Promise((resolve) => {
+    chrome.debugger.detach({ tabId }, () => { void chrome.runtime.lastError; resolve(); });
+  });
+}
+
+function dbgSend(tabId, method, params, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(method + " timed out")), timeoutMs || 8000);
+    chrome.debugger.sendCommand({ tabId }, method, params || {}, (res) => {
+      clearTimeout(timer);
+      const e = chrome.runtime.lastError;
+      if (e) reject(new Error(e.message)); else resolve(res);
+    });
+  });
+}
+
+function ensureDebugger(tabId) {
+  if (dbg.has(tabId)) return dbg.get(tabId);
+  const p = (async () => {
+    try {
+      await dbgAttach(tabId);
+    } catch (e) {
+      // A session from this extension's previous worker life can still hold
+      // the tab: drop it and attach again. Another tool's debugger cannot be
+      // detached from here, so the retry fails and the caller falls back.
+      if (!/already attached/i.test(e.message)) throw e;
+      await dbgDetach(tabId);
+      await dbgAttach(tabId);
+    }
+    await dbgSend(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
+  })();
+  dbg.set(tabId, p);
+  p.catch(() => dbg.delete(tabId));
+  return p;
+}
+
+async function cdp(tabId, method, params) {
+  await ensureDebugger(tabId);
+  return dbgSend(tabId, method, params);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function mouse(tabId, type, x, y) {
+  const p = { type, x, y, pointerType: "mouse", modifiers: 0 };
+  if (type === "mouseMoved") Object.assign(p, { button: "none", buttons: 0 });
+  else Object.assign(p, { button: "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: 1 });
+  return cdp(tabId, "Input.dispatchMouseEvent", p);
+}
+
+async function cdpKeyPress(tabId, events) {
+  for (const ev of events) await cdp(tabId, "Input.dispatchKeyEvent", ev);
+}
+
+// ── Command dispatch ────────────────────────────────────────────────────────
 
 // Actions that read or manage browser state without driving a page. They must
 // not resolve a target tab: doing so grabs the user's ACTIVE tab and drags it
@@ -845,78 +242,15 @@ const METADATA_ACTIONS = new Set([
   "tabInfo", "closeTab", "harnessTab", "newHarnessTab", "gc",
 ]);
 
-// ── trusted input via the Chrome debugger ───────────────────────────────────
-// Input.dispatch* events arrive as REAL user input: event.isTrusted === true,
-// default actions run (form submit on Enter, native focus, :active styles).
-// Attach/detach per action; if another debugger owns the tab, the caller
-// falls back to synthetic events.
-
-function cdpSend(tabId, commands) {
-  return new Promise((resolve, reject) => {
-    chrome.debugger.attach({ tabId }, "1.3", () => {
-      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-      const step = (i) => {
-        if (i >= commands.length) {
-          chrome.debugger.detach({ tabId }, () => {});
-          return resolve(true);
-        }
-        chrome.debugger.sendCommand({ tabId }, commands[i][0], commands[i][1], () => {
-          if (chrome.runtime.lastError) {
-            chrome.debugger.detach({ tabId }, () => {});
-            return reject(new Error(chrome.runtime.lastError.message));
-          }
-          step(i + 1);
-        });
-      };
-      step(0);
-    });
-  });
-}
-
-function cdpClick(tabId, x, y) {
-  const base = { x, y, button: "left", clickCount: 1, pointerType: "mouse" };
-  return cdpSend(tabId, [
-    ["Input.dispatchMouseEvent", { type: "mouseMoved", ...base, buttons: 0 }],
-    ["Input.dispatchMouseEvent", { type: "mousePressed", ...base, buttons: 1 }],
-    ["Input.dispatchMouseEvent", { type: "mouseReleased", ...base, buttons: 1 }],
-  ]);
-}
-
-// Hover-only move: the debugger mouse glides to (x, y) and stops there — no
-// press. This reveals hover-only controls (a "..." button that only shows on
-// mouseenter). Real trusted input, so CSS :hover and React mouseenter both fire.
-function cdpHover(tabId, x, y) {
-  return cdpSend(tabId, [
-    ["Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0, pointerType: "mouse" }],
-  ]);
-}
-
-const CDP_VK = {
-  Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46,
-  ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40,
-  Home: 36, End: 35, PageUp: 33, PageDown: 34, " ": 32,
-};
-
-function cdpKey(tabId, key, meta, shift) {
-  const modifiers = (meta ? 4 : 0) | (shift ? 8 : 0);
-  const vk = CDP_VK[key] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0);
-  const text = key === "Enter" ? "\r" : (key.length === 1 ? key : undefined);
-  const down = { type: "keyDown", modifiers, key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk };
-  if (text !== undefined && !meta) down.text = text;
-  return cdpSend(tabId, [
-    ["Input.dispatchKeyEvent", down],
-    ["Input.dispatchKeyEvent", { type: "keyUp", modifiers, key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }],
-  ]);
-}
-
-function cdpTypeText(tabId, text) {
-  const commands = [];
-  for (const ch of String(text).slice(0, 1000)) {
-    const vk = ch.toUpperCase().charCodeAt(0);
-    commands.push(["Input.dispatchKeyEvent", { type: "keyDown", key: ch, text: ch, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }]);
-    commands.push(["Input.dispatchKeyEvent", { type: "keyUp", key: ch, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }]);
-  }
-  return cdpSend(tabId, commands);
+// Target spec shared by click/hover/type/fill: ref (stable) | n | sel | text.
+// For type/fill, "text" is what to type, never a target.
+function specOf(msg, textIsTarget) {
+  const s = {};
+  if (msg.ref != null && msg.ref !== "") s.ref = String(msg.ref);
+  else if (msg.n != null && msg.n !== "") s.n = Number(msg.n);
+  else if (msg.sel) s.sel = String(msg.sel);
+  else if (textIsTarget && msg.text != null && msg.text !== "") { s.text = String(msg.text); s.exact = !!msg.exact; }
+  return s;
 }
 
 async function dispatchAction(msg, reply) {
@@ -924,7 +258,7 @@ async function dispatchAction(msg, reply) {
 
   if (METADATA_ACTIONS.has(action)) {
     switch (action) {
-      case "ping": return "v8";
+      case "ping": return "v9";
       case "reload": { setTimeout(() => chrome.runtime.reload(), 400); return "reloading"; }
       case "status": return currentState();
       case "tabs": {
@@ -987,6 +321,7 @@ async function dispatchAction(msg, reply) {
         return { removedTabs: removed, ungrouped, closedWindows };
       }
       case "closeTab": {
+        await dbgDetach(msg.tabId);
         await chrome.tabs.remove(msg.tabId);
         return { ok: true, closed: msg.tabId };
       }
@@ -1011,181 +346,244 @@ async function dispatchAction(msg, reply) {
           tab = await chrome.tabs.create(createProps);
         }
         const groupId = await ensureGrouped(tab);
+        // Attach the debugger now, once, so the first action does not shift
+        // the page with a fresh infobar.
+        if (settings.trustedInput) await ensureDebugger(tab.id).catch(() => {});
         return { tabId: tab.id, windowId: tab.windowId, groupId, url: tab.url || "" };
       }
     }
   }
 
-  const tab = await targetTab(msg.tabId);
-  await ensureGrouped(tab);
-
-  if (shouldBringForward(action)) {
-    await bringForward(tab).catch(() => {});
+  // Page actions need an explicit tab. Falling back to "the active tab" would
+  // drive (and group) whatever the user is looking at.
+  if (msg.tabId == null) {
+    return { ok: false, error: "no tab: page actions need a tabId", hint: "use the CLI with --session NAME (it pins a tab), or pass --tab ID" };
   }
+  const tab = await chrome.tabs.get(msg.tabId);
+  await ensureGrouped(tab);
+  const tabId = tab.id;
+  const show = settings.visualFeedback;
+  const trusted = settings.trustedInput;
 
-  const run = async (func, args) => {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func,
-      args: args || [],
-    });
-    const r = results && results[0];
-    if (r && r.exceptionDetails) {
-      throw new Error((r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text);
+  // Trusted click on a located element. The probe armed by locate tells us
+  // whether the debugger's mouse events reached the page; only if none did
+  // does the page fall back to a synthetic click, so nothing clicks twice.
+  const clickSpec = async (spec) => {
+    const loc = await pageCall(tabId, "locate", [spec, show]);
+    if (!loc || loc.ok !== true) return loc;
+    if (loc.covered || !trusted) {
+      await pageCall(tabId, "clickTagged", []);
+      const conf = (await pageCall(tabId, "confirmClick", [false]).catch(() => null)) || {};
+      return { ok: true, ...loc.meta, ...pickChecked(conf), via: loc.covered ? "synthetic-covered" : "synthetic" };
     }
-    return r && r.result;
-  };
-
-  // A non-active tab never processes debugger input — the renderer is parked.
-  // Trusted input therefore needs our tab to be the active one in ITS OWN
-  // window. Rule: never disturb the user. If the tab's window is the FOCUSED
-  // window (the user is working right there), we do NOT switch tabs — the
-  // caller falls back to synthetic events, which work fine on background
-  // tabs. In an unfocused window (the usual dedicated agent window) we
-  // activate our tab; user focus is untouched — that would need
-  // windows.update({focused}), which we never call.
-  const canRenderTrusted = async () => {
-    const [active] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
-    if (active && active.id === tab.id) return true;
-    const win = await chrome.windows.get(tab.windowId);
-    if (win.focused) return false;
-    await chrome.tabs.update(tab.id, { active: true });
-    return true;
-  };
-
-  // Element clicks: resolve the element, then click it with a REAL debugger
-  // mouse event (isTrusted: true). Falls back to synthetic dispatch when the
-  // element is covered, the debugger is taken, or trustedInput is off.
-  const trustedClick = async (mode, arg, exact) => {
-    if (!settings.trustedInput) return await run(actFunc, [mode, arg, null, exact, settings.visualFeedback]);
-    const cdpOk = await canRenderTrusted().catch(() => false);
-    if (!cdpOk) {
-      const r = await run(actFunc, [mode, arg, null, exact, settings.visualFeedback]);
-      if (r && typeof r === "object" && r.ok) r.via = "synthetic-background";
-      return r;
-    }
-    const loc = await run(locateFunc, [mode, arg, exact, settings.visualFeedback]);
-    if (!loc || loc.needsCdp !== true) return loc; // final result (error or synthetic-covered)
+    let cdpError = null;
     try {
-      // Hover first, then re-measure. Hover-revealed controls (a "..." that
-      // appears on mouseenter) can move when they show up, so clicking the
-      // pre-hover center misses them. The hover-only move triggers :hover, a
-      // short beat lets React re-render, then we click the element's NEW center.
-      await cdpHover(tab.id, loc.x, loc.y);
-      await new Promise((r) => setTimeout(r, 60));
-      const rem = await run(remeasureFunc, []);
-      const cx = rem && rem.x != null ? rem.x : loc.x;
-      const cy = rem && rem.y != null ? rem.y : loc.y;
-      await cdpClick(tab.id, cx, cy);
-      let confirm = {};
-      try { confirm = (await run(confirmClickFunc, [])) || {}; } catch { /* page navigated — fine */ }
-      return { ...loc.result, ...confirm, via: "cdp" };
-    } catch {
-      const fb = await run(actFunc, [mode, arg, null, exact, settings.visualFeedback]);
-      if (fb && typeof fb === "object") fb.via = "synthetic-fallback";
-      return fb;
+      // Hover first, then re-measure: hover-revealed controls can move when
+      // they appear, so the click goes to the element's NEW center.
+      await mouse(tabId, "mouseMoved", loc.x, loc.y);
+      await sleep(60);
+      const rem = await pageCall(tabId, "remeasure", []).catch(() => null);
+      const x = rem && rem.x != null ? rem.x : loc.x;
+      const y = rem && rem.y != null ? rem.y : loc.y;
+      await mouse(tabId, "mousePressed", x, y);
+      await mouse(tabId, "mouseReleased", x, y);
+    } catch (e) {
+      cdpError = String(e.message || e);
     }
+    let conf;
+    try { conf = (await pageCall(tabId, "confirmClick", [true])) || {}; } catch { conf = { landed: null }; /* page navigated: it landed */ }
+    if (conf.fellBack) return { ok: true, ...loc.meta, ...pickChecked(conf), via: "synthetic-fallback", ...(cdpError ? { cdpError } : { note: "debugger click did not reach the page" }) };
+    return { ok: true, ...loc.meta, ...pickChecked(conf), via: "cdp" };
+  };
+
+  // Run fn (which sends debugger input) with a probe armed for `kinds`.
+  // Returns true if the page saw the events (or navigated away), false if
+  // the input was dropped, or the error message if the debugger failed.
+  const probed = async (kinds, fn) => {
+    await pageCall(tabId, "armProbe", [kinds]);
+    try { await fn(); } catch (e) {
+      await pageCall(tabId, "readProbe", []).catch(() => null);
+      return String(e.message || e);
+    }
+    const pr = await pageCall(tabId, "readProbe", []).catch(() => ({ landed: null }));
+    return pr && pr.landed === false ? false : true;
+  };
+
+  // Type into a field: focus it in-page, select its content, then insert the
+  // text through the debugger (Input.insertText, or one trusted key per char
+  // for perKey). Verifies the value stuck; synthetic only if nothing landed.
+  const typeInto = async (spec, text, perKey) => {
+    const f = await pageCall(tabId, "focusField", [spec, true, show]);
+    if (!f || f.ok !== true) return f;
+    let via = null;
+    let cdpError = null;
+    if (trusted) {
+      try {
+        if (perKey) {
+          for (const ch of text) {
+            const evs = PilotKeys.keyEvents(ch === "\n" ? "Enter" : ch, {});
+            if (evs) await cdpKeyPress(tabId, evs);
+            else await cdp(tabId, "Input.insertText", { text: ch });
+          }
+        } else if (text === "") {
+          await cdpKeyPress(tabId, PilotKeys.keyEvents("Delete", {}));
+        } else {
+          await cdp(tabId, "Input.insertText", { text });
+        }
+        via = "cdp";
+      } catch (e) {
+        cdpError = String(e.message || e);
+      }
+    }
+    let chk = (await pageCall(tabId, "checkField", [text])) || {};
+    if (via === "cdp" && chk.landed === false && !chk.stuck) via = null;
+    if (!via) {
+      await pageCall(tabId, "setTagged", [text, !!perKey]);
+      chk = (await pageCall(tabId, "checkField", [text])) || {};
+      via = trusted ? "synthetic-fallback" : "synthetic";
+    }
+    const out = { ok: !!chk.stuck, typed: text.length + " chars" + (perKey ? " (keystrokes)" : ""), into: f.into, ref: f.ref, via, valueNow: chk.valueNow };
+    if (chk.landed) out.isTrusted = !!chk.trusted;
+    if (cdpError) out.cdpError = cdpError;
+    if (!chk.stuck) {
+      out.error = "the field did not take the text (value is now '" + String(chk.valueNow || "") + "')";
+      out.hint = perKey ? "the field may reject or reformat input; check form for errors" : "try typeKeys for masked or per-keystroke fields";
+    }
+    return out;
   };
 
   switch (action) {
-    case "snap": return await run(snapFunc, []);
-    case "dialog": return await run(dialogFunc, []);
-    case "form": return await run(formFunc, []);
-    case "click": return await trustedClick("click", String(msg.sel || ""), null);
-    case "clickText": return await trustedClick("clickText", String(msg.text || ""), Boolean(msg.exact));
-    case "clickN": return await trustedClick("clickN", Number(msg.n), null);
+    case "snap": return await pageCall(tabId, "snap", []);
+    case "dialog": return await pageCall(tabId, "dialog", []);
+    case "form": return await pageCall(tabId, "form", []);
+    case "click": return await clickSpec(specOf(msg, false));
+    case "clickText": return await clickSpec({ text: String(msg.text || ""), exact: !!msg.exact });
+    case "clickN": return await clickSpec(msg.ref ? { ref: String(msg.ref) } : { n: Number(msg.n) });
     case "clickXY": {
-      if (settings.trustedInput && await canRenderTrusted().catch(() => false)) {
-        try {
-          await cdpClick(tab.id, Number(msg.x), Number(msg.y));
-          return { ok: true, x: Number(msg.x), y: Number(msg.y), via: "cdp" };
-        } catch { /* fall through to synthetic */ }
+      const x = Number(msg.x), y = Number(msg.y);
+      if (trusted) {
+        const landed = await probed(["pointerdown", "mousedown", "click"], async () => {
+          await mouse(tabId, "mouseMoved", x, y);
+          await mouse(tabId, "mousePressed", x, y);
+          await mouse(tabId, "mouseReleased", x, y);
+        });
+        if (landed === true) return { ok: true, x, y, via: "cdp" };
+        const r = await pageCall(tabId, "clickXY", [x, y, show]);
+        return { ...r, via: "synthetic-fallback", ...(typeof landed === "string" ? { cdpError: landed } : {}) };
       }
-      return await run(actFunc, ["clickXY", Number(msg.x), Number(msg.y), null, settings.visualFeedback]);
+      return { ...(await pageCall(tabId, "clickXY", [x, y, show])), via: "synthetic" };
     }
-    case "hoverXY": {
-      if (settings.trustedInput && await canRenderTrusted().catch(() => false)) {
-        try {
-          await cdpHover(tab.id, Number(msg.x), Number(msg.y));
-          return { ok: true, x: Number(msg.x), y: Number(msg.y), via: "cdp" };
-        } catch { /* fall through to synthetic */ }
-      }
-      return await run(actFunc, ["hoverXY", Number(msg.x), Number(msg.y), null, settings.visualFeedback]);
-    }
+    case "hoverXY":
     case "hover": {
-      // Resolve like clickN/clickText/click, then glide the mouse onto the
-      // element's center WITHOUT pressing — reveals hover-only UI. Accepts
-      // {n}, {text} (+exact), or {sel}; use hoverXY for raw coordinates.
-      const hm = msg.sel ? "sel" : (msg.text ? "text" : (msg.n != null ? "n" : null));
-      const ha = hm === "sel" ? msg.sel : (hm === "text" ? msg.text : (hm === "n" ? msg.n : null));
-      if (!hm) return { ok: false, error: "hover needs {n}, {text}, or {sel} — or use hoverXY with {x},{y}" };
-      const loc = await run(hoverFunc, [hm, ha, msg.exact ? true : null]);
-      if (!loc || !loc.ok) return loc;
-      if (settings.trustedInput && await canRenderTrusted().catch(() => false)) {
-        try {
-          await cdpHover(tab.id, loc.x, loc.y);
-          return { ok: true, ...loc, via: "cdp" };
-        } catch { /* fall through to synthetic */ }
+      let x = Number(msg.x), y = Number(msg.y), meta = {};
+      if (action === "hover") {
+        const spec = specOf(msg, true);
+        if (!Object.keys(spec).length) return { ok: false, error: "hover needs {ref}, {n}, {text} or {sel}, or use hoverXY with {x},{y}" };
+        const loc = await pageCall(tabId, "hoverLocate", [spec, show]);
+        if (!loc || !loc.ok) return loc;
+        ({ x, y } = loc);
+        meta = loc;
       }
-      return await run(actFunc, ["hoverXY", loc.x, loc.y, null, settings.visualFeedback]);
+      if (trusted) {
+        const landed = await probed(["pointermove", "mousemove"], () => mouse(tabId, "mouseMoved", x, y));
+        if (landed === true) return { ok: true, ...meta, x, y, via: "cdp" };
+      }
+      const r = await pageCall(tabId, "hoverXY", [x, y, show]);
+      return { ...r, ...meta, via: trusted ? "synthetic-fallback" : "synthetic" };
     }
     case "key": {
-      if (settings.trustedInput && await canRenderTrusted().catch(() => false)) {
-        try {
-          await cdpKey(tab.id, String(msg.key || ""), Boolean(msg.meta), Boolean(msg.shift));
-          return { ok: true, key: String(msg.key || ""), via: "cdp" };
-        } catch { /* fall through to synthetic */ }
+      const key = String(msg.key || "");
+      const mods = { meta: !!msg.meta, shift: !!msg.shift, ctrl: !!msg.ctrl, alt: !!msg.alt };
+      const evs = PilotKeys.keyEvents(key, mods);
+      if (!evs) return { ok: false, error: "unknown key '" + key + "'", hint: "use a single character or a name like Enter, Tab, Escape, Backspace, Delete, ArrowDown, Home, End, PageDown, F5" };
+      if (trusted) {
+        const landed = await probed(["keydown"], () => cdpKeyPress(tabId, evs));
+        if (landed === true) return { ok: true, key, ...(evs[0].commands ? { commands: evs[0].commands } : {}), via: "cdp" };
       }
-      return await run(actFunc, ["key", String(msg.key || ""), Boolean(msg.meta), Boolean(msg.shift), settings.visualFeedback]);
+      const r = await pageCall(tabId, "syntheticKey", [key, mods.meta, mods.shift]);
+      return { ...r, via: trusted ? "synthetic-fallback" : "synthetic" };
     }
-    case "typeKeys": {
-      // Real per-character keystrokes from the debugger — what masked or
-      // per-key-formatted fields (card numbers, OTP boxes) actually require.
-      if (settings.trustedInput && await canRenderTrusted().catch(() => false)) {
-        const focus = await run(focusFieldFunc, [String(msg.sel || "")]);
-        if (!focus || focus.ok !== true) return focus;
-        try {
-          await cdpTypeText(tab.id, String(msg.text || ""));
-          let after = {};
-          try { after = (await run(fieldValueFunc, [])) || {}; } catch { /* ignore */ }
-          return { ok: true, typed: String(msg.text || "").length + " chars (trusted keystrokes)", into: focus.into, via: "cdp", ...after };
-        } catch { /* fall through to synthetic */ }
+    case "type":
+    case "replace": return await typeInto(specOf(msg, false), String(msg.text ?? ""), false);
+    case "typeKeys": return await typeInto(specOf(msg, false), String(msg.text ?? ""), true);
+    case "fill": {
+      const spec = specOf(msg, false);
+      if (!spec.ref && !spec.sel && spec.n == null) return { ok: false, error: "fill needs sel or ref", hint: "{\"action\":\"fill\",\"ref\":\"r3\",\"value\":\"...\"}" };
+      const value = String(msg.value ?? "");
+      const sel = await pageCall(tabId, "fillSelect", [spec, value]);
+      if (!sel || !sel.notSelect) return sel;
+      const kind = await pageCall(tabId, "targetKind", [spec]);
+      if (kind && (kind.type === "checkbox" || kind.type === "radio")) {
+        return { ok: false, error: "fill does not toggle a " + kind.type, hint: "click it instead: {\"action\":\"click\",\"ref\":\"...\"}" };
       }
-      return await run(actFunc, ["typeKeys", String(msg.sel || ""), String(msg.text || ""), null, settings.visualFeedback]);
+      const r = await typeInto(spec, value, false);
+      if (r && r.ok) r.filled = r.into;
+      return r;
     }
-    case "tail": return await run(actFunc, ["tail", null, null, null, settings.visualFeedback]);
-    case "read": return await run(actFunc, ["read", Number(msg.offset) || 0, null, null, settings.visualFeedback]);
-    case "hrefs": return await run(actFunc, ["hrefs", String(msg.text || ""), null, null, settings.visualFeedback]);
-    case "findText": return await run(findTextFunc, [String(msg.text || "")]);
-    case "fill": return await run(fillFunc, [String(msg.sel || ""), String(msg.value ?? "")]);
-    case "fillShadow": return await run(fillShadowFunc, [String(msg.match || ""), String(msg.value ?? "")]);
-    case "type": return await run(actFunc, ["type", String(msg.sel || ""), String(msg.text || ""), null, settings.visualFeedback]);
-    case "replace": return await run(actFunc, ["replace", String(msg.sel || ""), String(msg.text || ""), null, settings.visualFeedback]);
+    case "fillShadow": {
+      const loc = await pageCall(tabId, "fillShadowLocate", [String(msg.match || "")]);
+      if (!loc || !loc.ok) return loc;
+      const spec = { ref: loc.ref };
+      if (loc.tag === "select") return await pageCall(tabId, "fillSelect", [spec, String(msg.value ?? "")]);
+      return await typeInto(spec, String(msg.value ?? ""), false);
+    }
+    case "tail": return await pageCall(tabId, "tail", []);
+    case "read": return await pageCall(tabId, "read", [Number(msg.offset) || 0]);
+    case "hrefs": return await pageCall(tabId, "hrefs", [String(msg.text || "")]);
+    case "findText": return await pageCall(tabId, "findText", [String(msg.text || "")]);
     case "shot":
     case "screenshot":
       return await takeScreenshot(tab, msg);
     case "navigate": {
       // Wait for the load to finish so the very next snap sees the new page,
       // not the old one mid-teardown. 15s cap; a slow page returns loaded:false.
-      await chrome.tabs.update(tab.id, { url: msg.url });
-      const loaded = await new Promise((resolve) => {
+      const before = tab.url || "";
+      if (!/^[a-z][a-z0-9+.-]*:/i.test(String(msg.url || ""))) {
+        return { ok: false, error: "navigate needs an absolute URL, got '" + String(msg.url || "") + "'", url: before, hint: "include the scheme: https://example.com" };
+      }
+      let onUpd;
+      const loaded = new Promise((resolve) => {
         const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(onUpd); resolve(false); }, 15000);
-        function onUpd(tabId, info) {
-          if (tabId === tab.id && info.status === "complete") {
+        onUpd = (id, info) => {
+          if (id === tabId && info.status === "complete") {
             clearTimeout(timer);
             chrome.tabs.onUpdated.removeListener(onUpd);
             resolve(true);
           }
-        }
+        };
         chrome.tabs.onUpdated.addListener(onUpd);
       });
-      const now = await chrome.tabs.get(tab.id);
-      return { ok: true, url: now.url || msg.url, title: now.title || "", loaded };
+      try {
+        await chrome.tabs.update(tabId, { url: msg.url });
+      } catch (e) {
+        chrome.tabs.onUpdated.removeListener(onUpd);
+        return { ok: false, error: "navigate failed: " + String(e.message || e), url: before };
+      }
+      const done = await loaded;
+      const now = await chrome.tabs.get(tabId);
+      const url = now.url || "";
+      const sameAsAsked = stripHash(url) === stripHash(msg.url);
+      if (url === before && !sameAsAsked) {
+        return { ok: false, error: "navigation did not happen: the tab is still on " + before, url, title: now.title || "", loaded: done, hint: "check the URL (needs https://...); the page may also have blocked it" };
+      }
+      return { ok: true, url, title: now.title || "", loaded: done };
     }
     default:
       return reply({ ok: false, error: "unknown action '" + action + "'", hint: "run {\"action\":\"help\"} via the CLI for the command list" }) ?? undefined;
   }
 }
+
+function pickChecked(conf) {
+  const out = {};
+  if (conf && conf.checkedNow !== undefined) out.checkedNow = conf.checkedNow;
+  if (conf && conf.landed) out.isTrusted = !!conf.trusted;
+  return out;
+}
+
+function stripHash(u) {
+  return String(u || "").replace(/#.*$/, "").replace(/\/$/, "");
+}
+
 
 // ── Screenshots ─────────────────────────────────────────────────────────────
 
@@ -1220,18 +618,10 @@ function tabIsActive(tab) {
   return chrome.tabs.query({ active: true, windowId: tab.windowId }).then((t) => t[0] && t[0].id === tab.id);
 }
 
-function cdpScreenshot(tabId, format) {
-  return new Promise((resolve, reject) => {
-    chrome.debugger.attach({ tabId }, "1.3", () => {
-      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-      chrome.debugger.sendCommand({ tabId }, "Page.captureScreenshot", { format }, (res) => {
-        chrome.debugger.detach({ tabId }, () => {});
-        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-        if (!res || !res.data) return reject(new Error("no screenshot data"));
-        resolve(`data:image/png;base64,${res.data}`);
-      });
-    });
-  });
+async function cdpScreenshot(tabId, format) {
+  const res = await cdp(tabId, "Page.captureScreenshot", { format });
+  if (!res || !res.data) throw new Error("no screenshot data");
+  return `data:image/png;base64,${res.data}`;
 }
 
 async function measureDataUrl(dataUrl) {
@@ -1269,28 +659,21 @@ function blobToDataUrl(blob) {
 
 // ── Tab helpers ─────────────────────────────────────────────────────────────
 
-function targetTab(tabId) {
-  if (tabId != null) return chrome.tabs.get(tabId);
-  return chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((t) => t[0]);
-}
-
 // Mark the tab the harness is driving so it is obvious on screen: a colored
-// tab group (name/color from Options; default red "Harness").
+// tab group (name/color from Options; default red "Harness"). The group is
+// created in the tab's OWN window: without createProperties.windowId Chrome
+// builds it in the last-focused window and moves the tab there, which is how
+// a claimed agent-window tab ended up in the user's window (and the empty
+// agent window closed).
 async function ensureGrouped(tab) {
   if (tab.groupId !== -1) return tab.groupId;
   try {
-    const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
+    const groupId = await chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId: tab.windowId } });
     await chrome.tabGroups.update(groupId, { title: settings.groupName, color: settings.groupColor }).catch(() => {});
     return groupId;
   } catch (e) {
     return -1;
   }
-}
-
-// Only called when the user opted in to focus-stealing (focusOnAction: true).
-async function bringForward(tab) {
-  await chrome.tabs.update(tab.id, { active: true });
-  await chrome.windows.update(tab.windowId, { focused: true });
 }
 
 // ── Wiring ──────────────────────────────────────────────────────────────────

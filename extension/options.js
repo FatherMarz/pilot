@@ -7,7 +7,6 @@ const DEFAULTS = {
   autoStartRelay: true,
   groupName: "Harness",
   groupColor: "red",
-  focusOnAction: false,
   visualFeedback: true,
   screenshotMode: "auto",
   shotMaxWidth: 1280,
@@ -24,7 +23,6 @@ function load() {
     document.getElementById("autoStartRelay").checked = !!s.autoStartRelay;
     document.getElementById("groupName").value = s.groupName;
     document.getElementById("groupColor").value = s.groupColor;
-    document.getElementById("focusOnAction").checked = !!s.focusOnAction;
     document.getElementById("visualFeedback").checked = s.visualFeedback !== false;
     document.getElementById("screenshotMode").value = s.screenshotMode;
     document.getElementById("shotMaxWidth").value = s.shotMaxWidth;
@@ -42,7 +40,6 @@ function save() {
     autoStartRelay: document.getElementById("autoStartRelay").checked,
     groupName: document.getElementById("groupName").value.trim() || "Harness",
     groupColor: document.getElementById("groupColor").value,
-    focusOnAction: document.getElementById("focusOnAction").checked,
     visualFeedback: document.getElementById("visualFeedback").checked,
     screenshotMode: document.getElementById("screenshotMode").value,
     shotMaxWidth: Math.max(0, parseInt(document.getElementById("shotMaxWidth").value, 10) || 0),
