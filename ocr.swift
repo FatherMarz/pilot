@@ -5,6 +5,7 @@
 //
 // Build:   swiftc -O ocr.swift -o ocr
 // Usage:   ./ocr /path/to/image.png [--json]
+// Exit:    0 text found, 3 no text found (blank or unreadable image), 1/2 errors
 
 import Foundation
 import Vision
@@ -37,6 +38,11 @@ do {
 }
 
 let observations = request.results ?? []
+let found = observations.contains { ($0.topCandidates(1).first?.string ?? "").trimmingCharacters(in: .whitespaces) != "" }
+if !found {
+    FileHandle.standardError.write("no text found in \(path)\n".data(using: .utf8)!)
+    exit(3)
+}
 if wantJSON {
     let items = observations.map { (obs: VNRecognizedTextObservation) -> [String: Any] in
         let candidate = obs.topCandidates(1).first
