@@ -15,7 +15,9 @@
 //     foreground, the user's previous tab is put back at once.
 //   - Every page call has a timeout, and JavaScript dialogs (alert, confirm,
 //     prompt, beforeunload) are answered automatically through the debugger,
-//     so a dialog can never hang the bridge.
+//     or by a page shim when the debugger is out, so a dialog can never hang
+//     the bridge. Other extensions' frames are removed from driven tabs (they
+//     make Chrome refuse the debugger) and a dropped debugger heals itself.
 //   - Frames: page.js runs in every frame. Refs carry the document number
 //     ("p4r12"), so a ref routes to the frame it came from, and a ref from a
 //     page that has since navigated is refused instead of hitting a stranger.

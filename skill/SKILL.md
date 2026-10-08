@@ -54,7 +54,7 @@ p1r3 button "Log in"
 - If an item is not in the snap, scroll: `{"action":"scroll","dy":800}`, then snap.
 - If the page is still loading, wait: `{"action":"wait","text":"Welcome"}`.
 - New tabs open in the background. The reply shows `opened:{"tabId":123,"url":"..."}`. Drive it with `--tab 123`.
-- Alerts, confirms and prompts are answered for you (accept). The reply shows `dialog:{...}`.
+- Alerts, confirms and prompts are answered for you (accept), with or without the debugger. The reply shows `dialog:{...}`.
 - To dismiss the next dialog instead: `{"action":"dialogPolicy","accept":false,"once":true}`.
 - Items marked `[frame 2]` are inside an iframe. Use their refs like any other.
 - For long text use `{"action":"text"}` (main content) or `{"action":"read"}` (everything).
@@ -104,10 +104,14 @@ p1r3 button "Log in"
 - `ok:false` — it did not. `error` says why, `hint` says what to do.
 - `via` says how input went in: `cdp` (real input, normal), `native-setter`
   (date/number fields), `synthetic-*` (fallback; `cdpNote` explains why, for
-  example a password manager's frame blocks the debugger).
+  example DevTools holds the debugger). Pilot removes other extensions' frames
+  (a password manager's menu) from its own tab, so they do not block real input.
+- Drag replies say `via:"cdp-html5-drag"` (real drag), `cdp-mouse` (mouse-driven
+  list) or `synthetic-dragevent` (fallback).
 - `navigated:true` — the page changed. Snap again.
 - `opened:{tabId,url}` — a new background tab. `--tab ID` drives it.
-- `dialog:{type,message,accepted}` — an alert/confirm/prompt was answered.
+- `dialog:{type,message,accepted}` — an alert/confirm/prompt was answered
+  (`via:"page-shim"` when the debugger was unavailable).
 
 ## Before you start
 
