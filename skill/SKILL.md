@@ -18,21 +18,25 @@ cd pilot
 node cli.js '{"action":"claim"}' --session myjob        # 1. pin a tab, ONCE
 node cli.js '{"action":"navigate","url":"https://..."}' --session myjob   # waits for load
 node cli.js '{"action":"snap"}' --session myjob         # 2. LOOK: numbered items
-node cli.js '{"action":"clickN","n":4}' --session myjob # 3. ACT: click item 4 from the snap
+node cli.js '{"action":"clickN","n":4}' --session myjob # 3. ACT: click item 4 (or {"action":"click","ref":"r5"})
 node cli.js '{"action":"snap"}' --session myjob         # 4. CONFIRM it worked
 ```
 
-Clicks and keys are TRUSTED input: Pilot resolves the element, then clicks it
-through the Chrome debugger, so pages see `event.isTrusted === true` — same as
-a human click (and same as Claude in Chrome). Pilot NEVER disturbs the user: if the target
-tab sits in the window the user is working in, it stays a background tab and
-gets simulated events instead (those work fine unfocused). The reply's `via`
-field says which path ran (`cdp`, `synthetic-background`, `synthetic-covered`,
-`synthetic-fallback`).
+Clicks, keys and typing are TRUSTED input (`event.isTrusted === true`), sent
+through the Chrome debugger, so React/Angular forms register them. Pilot NEVER
+activates, focuses or switches to a tab: it drives a background tab, even one in
+the window the user is working in. The debugger attaches once per tab and stays
+attached until release (Chrome shows a "started debugging" bar while it is).
+Each action checks the page really got the input; only if not does it fall back
+to simulated events. The reply's `via` says which path ran: `cdp` (normal),
+`synthetic-covered` (element under an overlay), `synthetic-select` (`<select>`
+fill), `synthetic-fallback` (debugger busy or input did not land).
 
 Look before you click. Snap, act, snap again. One action at a time.
-`clickN` (click by snap item number) is the most reliable click — no selector, no
-text-matching, no coordinates. When in doubt: `node cli.js '{"action":"help"}'`
+Every snap item has a stable `ref` (`"r12"`) that keeps pointing at the same
+element after the page changes; `{"action":"click","ref":"r12"}` is the most
+reliable target (also on `type`, `fill`, `hover`). `clickN` still works within
+one unchanged page. When in doubt: `node cli.js '{"action":"help"}'`
 prints every command with an example (works even with the relay down).
 
 Claim is frugal by default: it reuses your tab, then adopts an idle session's
@@ -47,8 +51,9 @@ When done, `{"action":"release"}` closes your tab and keeps the group tidy.
 Every reply is JSON with an `ok` field.
 - `ok: true` → the action happened; the reply says what it hit (`clicked`, `valueNow`, ...).
 - `ok: false` → read `error` and `hint`. Failures include recovery data: a failed
-  click returns `visibleTexts` (what you CAN click), a failed fill returns `fields`
-  (what exists), a failed select fill returns `options`. Use that data — do not retry
+  click returns `visibleTexts` (what you CAN click), a missed type/fill target returns
+  `fields` (with refs), a failed select fill returns `options`. `type`/`fill` return
+  `ok:false` when the value did not stick, and `navigate` when the URL did not change. Use that data — do not retry
   the same command blind.
 
 ## Before you start (the handshake)
@@ -69,23 +74,25 @@ Every reply is JSON with an `ok` field.
 | Goal | Command |
 | --- | --- |
 | Help (full list + examples) | `{"action":"help"}` |
-| See the page | `{"action":"snap"}` — title, url, text, **numbered** clickable items |
-| Click snap item N | `{"action":"clickN","n":3}` — the reliable default |
+| See the page | `{"action":"snap"}` — title, url, text (incl. field values), items with `n`, `ref`, `role`, `name`, `value`, `checked`, `required`, `disabled` |
+| Click by ref (stable) | `{"action":"click","ref":"r12"}` — the reliable default |
+| Click snap item N | `{"action":"clickN","n":3}` — same page only |
 | Click by text | `{"action":"clickText","text":"Save"}` — forgiving (case, partial); `"exact":true` to pin |
 | Click by CSS selector | `{"action":"click","sel":"button.submit"}` |
 | Click by coordinates | `{"action":"clickXY","x":300,"y":500}` — use x/y from snap |
-| Type into the visible field | `{"action":"type","text":"hello"}` — sets the field to the text |
-| Type into a specific field | `{"action":"type","sel":"#message","text":"hi"}` |
-| Replace field content | `{"action":"replace","sel":"#name","text":"Ada"}` |
-| Real keystrokes (masked/formatted fields) | `{"action":"typeKeys","sel":"#card","text":"4242424242424242"}` — use when `type`/`fill` doesn't stick |
-| Set input/select value | `{"action":"fill","sel":"[name=size]","value":"medium"}` — selects also match by option label |
-| Fill a shadow-DOM field | `{"action":"fillShadow","match":"email","value":"a@b.c"}` — `match` is a substring of the field's name/placeholder/aria-label |
-| Press a key | `{"action":"key","key":"Enter"}` (`"meta":true`, `"shift":true`) |
-| Inspect form fields | `{"action":"form"}` — inputs, selects, radios, visible error text |
-| Open dialog text | `{"action":"dialog"}` |
-| Find text position | `{"action":"findText","text":"Total"}` |
+| Hover | `{"action":"hover","ref":"r12"}` (or `text`/`n`/`sel`); `hoverXY` for coordinates |
+| Type into a field | `{"action":"type","ref":"r3","text":"hi"}` — sets the field to the text (also `sel`) |
+| Type into the focused field | `{"action":"type","text":"hello"}` — focused field, or the only field; else `ok:false` + `fields` |
+| Replace field content | `{"action":"replace","ref":"r3","text":"Ada"}` (same as type) |
+| Real keystrokes (masked/formatted fields) | `{"action":"typeKeys","ref":"r4","text":"4242424242424242"}` — use when `type` doesn't stick |
+| Set input/select value | `{"action":"fill","ref":"r5","value":"medium"}` — selects also match by option label |
+| Fill a shadow-DOM field | `{"action":"fillShadow","match":"email","value":"a@b.c"}` — `match` is a substring of the field's name/placeholder/label |
+| Press a key | `{"action":"key","key":"Enter"}` — any character or key name; `"meta":true` for Cmd+A/C/X/V/Z (`"shift":true` + z = redo) |
+| Inspect form fields | `{"action":"form"}` — fields of the open dialog (or page): ref, name, role, value, required, disabled, options, plus errors |
+| Open dialog text | `{"action":"dialog"}` — the top visible dialog |
+| Find text position | `{"action":"findText","text":"Total"}` — also matches field values |
 | Read a long page | `{"action":"read"}` — 12000 chars of page text; `"offset":12000` continues |
-| Navigate (waits for load) | `{"action":"navigate","url":"https://example.com"}` — returns `loaded:false` if >15s |
+| Navigate (waits for load) | `{"action":"navigate","url":"https://example.com"}` — absolute URL; `loaded:false` if >15s, `ok:false` if the URL did not change |
 | List tabs | `{"action":"tabs"}` |
 | Screenshot | `{"action":"shot"}` (to `~/.pilot/shots/`; `--out FILE` to choose) |
 
@@ -107,6 +114,10 @@ node cli.js --sessions                            # list every session's pinned 
   Different Chrome profiles: `--profile work` vs `--profile personal`.
 - Hard limit: one debugger per tab (Chrome's rule). Two agents must not drive the
   SAME tab at once; own sessions → no contention.
+- Every `claim` drops pins whose tab is gone and auto-releases sessions idle >24h.
+- Driven tabs sit in a yellow "Pilot" tab group. Default claim opens one unfocused
+  agent window per profile; `--here` puts the tab in the focused window as a
+  background tab. Either way Pilot never brings it forward.
 
 ## Reading screenshots — no API key needed
 
