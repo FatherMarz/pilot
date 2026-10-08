@@ -1,4 +1,4 @@
-// Relay tests: handshake, multi-profile routing, queuing, status, HTTP endpoint.
+// Relay tests: handshake, multi-profile routing, no queuing, status, HTTP endpoint.
 const { test } = require("node:test");
 const assert = require("node:assert");
 const WebSocket = require("ws");
@@ -109,20 +109,42 @@ test("cli command routes to the targeted profile and reply returns", async (t) =
   assert.equal(reply.value, "v7");
 });
 
-test("command for a disconnected profile is queued, then delivered on connect", async (t) => {
-  const relay = createRelay(0);
+test("a page action for a disconnected profile fails at once and is never replayed", async (t) => {
+  const relay = createRelay(0, { waitMs: 200 });
   const port = await relay.listen(0);
   t.after(() => relay.close());
 
   const cli = await connect(port, { hello: "cli" });
-  cli.send(JSON.stringify({ id: 5, action: "snap", profile: "late" }));
-  const queued = await next(cli, (m) => m.id === 5);
-  assert.equal(queued.queued, true);
+  cli.send(JSON.stringify({ id: 5, action: "click", ref: "p1r2", profile: "late" }));
+  const fail = await next(cli, (m) => m.id === 5, 150);
+  assert.equal(fail.ok, false);
+  assert.equal(fail.notConnected, true);
+  assert.match(fail.error, /not connected/);
 
   const ext = await connect(port, { hello: "extension", profile: "late" });
   await next(ext, (m) => m.type === "handshake");
-  const cmd = await next(ext, (m) => m.id === 5);
-  assert.equal(cmd.action, "snap");
+  await wait(150);
+  assert.equal(ext.messages.filter((m) => m.id === 5).length, 0, "must not replay a failed page action");
+});
+
+test("read-only status commands wait briefly for a reconnect, then fail", async (t) => {
+  const relay = createRelay(0, { waitMs: 300 });
+  const port = await relay.listen(0);
+  t.after(() => relay.close());
+
+  const cli = await connect(port, { hello: "cli" });
+  cli.send(JSON.stringify({ id: 6, action: "tabs", profile: "late" }));
+  await wait(50);
+  const ext = await connect(port, { hello: "extension", profile: "late" });
+  await next(ext, (m) => m.type === "handshake");
+  const cmd = await next(ext, (m) => m.id === 6);
+  assert.equal(cmd.action, "tabs");
+
+  cli.send(JSON.stringify({ id: 7, action: "tabs", profile: "never" }));
+  const fail = await next(cli, (m) => m.id === 7, 1000);
+  assert.equal(fail.ok, false);
+  await wait(50);
+  assert.equal(ext.messages.filter((m) => m.id === 7).length, 0);
 });
 
 test("commands to a different profile are not delivered to the connected one", async (t) => {
@@ -134,13 +156,29 @@ test("commands to a different profile are not delivered to the connected one", a
   await next(ext, (m) => m.type === "handshake");
 
   const cli = await connect(port, { hello: "cli" });
-  cli.send(JSON.stringify({ id: 9, action: "ping", profile: "other" }));
-  const queued = await next(cli, (m) => m.id === 9);
-  assert.equal(queued.queued, true);
+  cli.send(JSON.stringify({ id: 9, action: "snap", profile: "other" }));
+  const fail = await next(cli, (m) => m.id === 9);
+  assert.equal(fail.ok, false);
+  assert.match(fail.hint, /work/);
 
   await wait(100);
   const got = ext.messages.filter((m) => m.id === 9);
   assert.equal(got.length, 0, "must not leak to another profile");
+});
+
+test("pending commands fail when the extension disconnects mid-command", async (t) => {
+  const relay = createRelay(0);
+  const port = await relay.listen(0);
+  t.after(() => relay.close());
+  const ext = await connect(port, { hello: "extension", profile: "work" });
+  await next(ext, (m) => m.type === "handshake");
+  const cli = await connect(port, { hello: "cli" });
+  cli.send(JSON.stringify({ id: 11, action: "snap", profile: "work" }));
+  await next(ext, (m) => m.id === 11);
+  ext.close();
+  const fail = await next(cli, (m) => m.id === 11);
+  assert.equal(fail.ok, false);
+  assert.match(fail.error, /disconnected/);
 });
 
 test("disconnecting a profile removes it from status", async (t) => {

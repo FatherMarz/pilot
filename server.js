@@ -5,6 +5,9 @@
 //     must click Connect in the Pilot popup, so a profile only shows up here
 //     after an explicit human action.
 //   - The harness CLI connects here, targets a profile, and gets replies.
+//     Commands are never queued: a page action for a profile that is not
+//     connected fails at once. Only read-only metadata (status, tabs, ...)
+//     waits up to 4s for a reconnect, then fails.
 //   - A tiny HTTP GET / endpoint reports who is connected, so tooling and the
 //     web page can show live status without a WebSocket client.
 //
@@ -16,12 +19,17 @@ const WebSocket = require("ws");
 
 const DEFAULT_PORT = Number(process.env.PILOT_PORT || 8756);
 
-function createRelay(port = DEFAULT_PORT) {
+function createRelay(port = DEFAULT_PORT, opts = {}) {
+  const waitMs = opts.waitMs != null ? opts.waitMs : 4000;
   // profileName -> extension WebSocket. A second connect from the same profile
   // (e.g. the user re-opened Chrome) replaces the stale one.
   const extensions = new Map();
-  // Commands waiting for a profile that is not connected yet.
-  const queued = [];
+  // Read-only metadata commands that may wait briefly for a reconnecting
+  // profile (an extension reload drops the socket for ~1-3s). Nothing else is
+  // ever held: a page action that arrives while its profile is away fails at
+  // once, so it can never replay late after the CLI already reported failure.
+  const WAITABLE = new Set(["ping", "status", "tabs", "windows", "activeTab", "tabInfo"]);
+  const waiting = []; // { id, reply, body, profile, timer }
   // id -> { reply, profile } for in-flight commands.
   const pending = new Map();
   // CLI sockets, so we can push status changes to them.
@@ -37,7 +45,16 @@ function createRelay(port = DEFAULT_PORT) {
         connectedAt: ws.connectedAt,
         age: Math.round((now - ws.connectedAt) / 1000),
       })),
-      queued: queued.length,
+      waiting: waiting.length,
+    };
+  }
+
+  function notConnected(id, profile) {
+    const names = [...extensions.keys()];
+    return {
+      id, ok: false, notConnected: true, profile,
+      error: "profile '" + profile + "' not connected — ask the user to click Connect in the Pilot popup",
+      hint: names.length ? "connected profiles: " + names.join(", ") + " (pass --profile NAME)" : "no Chrome profile is connected to the relay; nothing was sent",
     };
   }
 
@@ -86,18 +103,14 @@ function createRelay(port = DEFAULT_PORT) {
         ws.send(JSON.stringify({ type: "handshake", ok: true, profile }));
         broadcastStatus();
 
-        // Deliver anything queued for this profile, in order.
-        const toDeliver = queued.filter((c) => c.profile === profile);
-        if (toDeliver.length) {
-          // keep other profiles' queues untouched
-          const remaining = queued.filter((c) => c.profile !== profile);
-          queued.length = 0;
-          queued.push(...remaining);
-          for (const cmd of toDeliver) {
-            pending.set(cmd.id, { reply: cmd.reply, profile });
-            ws.send(JSON.stringify({ id: cmd.id, ...cmd.body }));
-          }
-          console.log(`delivered ${toDeliver.length} queued cmd(s) to "${profile}"`);
+        // Deliver the read-only commands that were waiting for this profile.
+        for (let i = waiting.length - 1; i >= 0; i--) {
+          const w = waiting[i];
+          if (w.profile !== profile) continue;
+          waiting.splice(i, 1);
+          clearTimeout(w.timer);
+          pending.set(w.id, { reply: w.reply, profile });
+          ws.send(JSON.stringify({ id: w.id, ...w.body }));
         }
         return;
       }
@@ -129,11 +142,16 @@ function createRelay(port = DEFAULT_PORT) {
         if (target && target.readyState === 1) {
           pending.set(id, { reply, profile });
           target.send(JSON.stringify({ id, ...body }));
+        } else if (WAITABLE.has(body.action)) {
+          const w = { id, reply, body, profile };
+          w.timer = setTimeout(() => {
+            const i = waiting.indexOf(w);
+            if (i >= 0) waiting.splice(i, 1);
+            reply(JSON.stringify(notConnected(id, profile)));
+          }, waitMs);
+          waiting.push(w);
         } else {
-          queued.push({ id, reply, body, profile });
-          console.log(`cmd queued for "${profile}" (not connected) at`, new Date().toISOString().slice(11, 19));
-          // Tell the CLI immediately that this is queued, not dead.
-          ws.send(JSON.stringify({ id, ok: false, error: "queued", queued: true, profile }));
+          ws.send(JSON.stringify(notConnected(id, profile)));
         }
         return;
       }
@@ -143,6 +161,12 @@ function createRelay(port = DEFAULT_PORT) {
       if (ws.hello === "extension") {
         if (extensions.get(ws.profile) === ws) {
           extensions.delete(ws.profile);
+          // In-flight commands on this socket will never get an answer.
+          for (const [id, p] of pending) {
+            if (p.profile !== ws.profile) continue;
+            pending.delete(id);
+            p.reply(JSON.stringify({ id, ok: false, error: "the Pilot extension disconnected before answering (it may have reloaded); the action may or may not have run", hint: "check with snap before retrying" }));
+          }
           console.log(`pilot profile "${ws.profile}" disconnected, age ${((Date.now() - t0) / 1000).toFixed(1)}s`);
           broadcastStatus();
         }
@@ -175,6 +199,7 @@ function createRelay(port = DEFAULT_PORT) {
     close: () =>
       new Promise((resolve) => {
         clearInterval(heartbeat);
+        for (const w of waiting) clearTimeout(w.timer);
         for (const cli of clis) { try { cli.terminate(); } catch {} }
         for (const ws of extensions.values()) { try { ws.terminate(); } catch {} }
         wss.close(() => httpServer.close(() => resolve()));
