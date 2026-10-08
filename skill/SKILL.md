@@ -1,157 +1,150 @@
 ---
 name: pilot
-description: "Drive the user's Chrome browser from the harness via the Pilot bridge — clicks, keys, typing, form fills, tab management, and small screenshots (read locally with OCR, no vision API key needed). Use when the user asks you to do something in the browser (a web app, a form, a marketplace page), when you need to see or interact with a page, or when a task mentions Pilot or driving Chrome. Requires the Pilot relay (starts with the harness) and the Pilot extension in Chrome (auto-connects)."
+description: "Drive the user's Chrome browser from the harness via the Pilot bridge — clicks, keys, typing, form fills, uploads, tab management, and small screenshots (read locally with OCR, no vision API key needed). Use when the user asks you to do something in the browser (a web app, a form, a marketplace page), when you need to see or interact with a page, or when a task mentions Pilot or driving Chrome. Requires the Pilot relay (starts with the harness) and the Pilot extension in Chrome (auto-connects)."
 ---
 
 # /pilot — Drive Chrome from the harness
 
-Pilot is a local bridge: a Chrome extension + a relay + a CLI. You command the CLI,
-the relay routes to the connected Chrome profile, the extension clicks/types/snapshots
-the page. It works on **background tabs** — you do not need to steal the user's window.
+Pilot drives ONE background tab in the user's Chrome. It never brings that tab
+to the front and never changes the tab the user is looking at.
 
-Run every command from the directory where you cloned Pilot.
-
-## The golden loop (do this, in this order)
+Pilot lives at `~/Development/custom-tools/pilot` (or wherever you cloned it).
+Run every command from there:
 
 ```sh
-cd pilot
-node cli.js '{"action":"claim"}' --session myjob        # 1. pin a tab, ONCE
-node cli.js '{"action":"navigate","url":"https://..."}' --session myjob   # waits for load
-node cli.js '{"action":"snap"}' --session myjob         # 2. LOOK: numbered items
-node cli.js '{"action":"clickN","n":4}' --session myjob # 3. ACT: click item 4 (or {"action":"click","ref":"r5"})
-node cli.js '{"action":"snap"}' --session myjob         # 4. CONFIRM it worked
+cd ~/Development/custom-tools/pilot
 ```
 
-Clicks, keys and typing are TRUSTED input (`event.isTrusted === true`), sent
-through the Chrome debugger, so React/Angular forms register them. Pilot NEVER
-activates, focuses or switches to a tab: it drives a background tab, even one in
-the window the user is working in. The debugger attaches once per tab and stays
-attached until release (Chrome shows a "started debugging" bar while it is).
-Each action checks the page really got the input; only if not does it fall back
-to simulated events. The reply's `via` says which path ran: `cdp` (normal),
-`synthetic-covered` (element under an overlay), `synthetic-select` (`<select>`
-fill), `synthetic-fallback` (debugger busy or input did not land).
+## The golden loop
 
-Look before you click. Snap, act, snap again. One action at a time.
-Every snap item has a stable `ref` (`"r12"`) that keeps pointing at the same
-element after the page changes; `{"action":"click","ref":"r12"}` is the most
-reliable target (also on `type`, `fill`, `hover`). `clickN` still works within
-one unchanged page. When in doubt: `node cli.js '{"action":"help"}'`
-prints every command with an example (works even with the relay down).
+```sh
+node cli.js '{"action":"claim"}' --session job                              # 1. get your tab (once)
+node cli.js '{"action":"navigate","url":"https://example.com"}' --session job  # 2. open the page
+node cli.js '{"action":"snap"}' --session job                               # 3. look
+node cli.js '{"action":"click","ref":"p1r3"}' --session job                 # 4. act on ONE ref
+node cli.js '{"action":"snap"}' --session job                               # 5. look again
+node cli.js '{"action":"release"}' --session job                            # 6. ALWAYS release when done
+```
 
-Claim is frugal by default: it reuses your tab, then adopts an idle session's
-tab (same profile, idle 30+ min) instead of opening another one. `--no-reuse`
-forces a fresh tab. Check the board with `node cli.js --sessions` (shows every
-session's tab, URL, and idle time). If a reply carries a `hint` suggesting
-`node cli.js gc --keep <your-session>`, several sessions are stale — run it.
-When done, `{"action":"release"}` closes your tab and keeps the group tidy.
+`snap` prints one line per item. The first word is the ref:
 
-## Reading replies
+```
+ok:true page p1 "Login" https://example.com/login
+items (3), on screen first; act with the ref, e.g. {"action":"click","ref":"p1r1"}:
+p1r1 textbox "Username" (empty)
+p1r2 textbox "Password" (empty)
+p1r3 button "Log in"
+```
 
-Every reply is JSON with an `ok` field.
-- `ok: true` → the action happened; the reply says what it hit (`clicked`, `valueNow`, ...).
-- `ok: false` → read `error` and `hint`. Failures include recovery data: a failed
-  click returns `visibleTexts` (what you CAN click), a missed type/fill target returns
-  `fields` (with refs), a failed select fill returns `options`. `type`/`fill` return
-  `ok:false` when the value did not stick, and `navigate` when the URL did not change. Use that data — do not retry
-  the same command blind.
+## Rules
 
-## Before you start (the handshake)
+- Put `--session NAME` on every command. Use the same NAME the whole task.
+- Run `claim` first. Without it every command fails with "run claim first".
+- Single-quote the JSON. Double-quote the keys.
+- One action per command. Then check the reply.
+- Check `ok` in every reply. `ok:false` means it did NOT work.
+- On `ok:false`, read `error` and `hint` and do what the hint says. Do not repeat the same command.
+- Use refs from the LAST snap only (`p1r3`). The `p1` part is the page.
+- After a navigation, snap again. Old refs fail with "page changed since that snap — snap again".
+- A reply with `navigated:true` means the page changed: snap again.
+- To type into a field: `{"action":"type","ref":"p1r1","text":"hello"}`.
+- To choose in a dropdown or set a date/time/number: `{"action":"fill","ref":"p1r5","value":"2026-10-08"}`.
+- Dates are `YYYY-MM-DD`, times `HH:MM`. A bad value fails and the field keeps its old value.
+- To press Enter in the focused field: `{"action":"key","key":"Enter"}`.
+- If an item is not in the snap, scroll: `{"action":"scroll","dy":800}`, then snap.
+- If the page is still loading, wait: `{"action":"wait","text":"Welcome"}`.
+- New tabs open in the background. The reply shows `opened:{"tabId":123,"url":"..."}`. Drive it with `--tab 123`.
+- Alerts, confirms and prompts are answered for you (accept). The reply shows `dialog:{...}`.
+- To dismiss the next dialog instead: `{"action":"dialogPolicy","accept":false,"once":true}`.
+- Items marked `[frame 2]` are inside an iframe. Use their refs like any other.
+- For long text use `{"action":"text"}` (main content) or `{"action":"read"}` (everything).
+- Unknown action? Run `{"action":"help"}`. Do NOT run reload.
+- Never log in to real accounts, buy, post or submit real data unless the user asked you to.
+- When the task is done, run `release`. It closes your tab and the tabs it opened.
 
-1. Relay: `curl -s http://127.0.0.1:8756/` → `{"server":"pilot","profiles":[...]}`.
-   It starts with the harness; if it is down, run `node server.js` in the pilot dir
-   (background it).
-2. If `profiles` is empty the extension is not connected. It auto-connects on browser
-   start, so normally it is already there. If it is genuinely absent, ask the user ONCE
-   to click **Connect** in the Pilot popup. **Do not ask twice.**
-3. `node cli.js --status` shows the connected profile names. Target one with
-   `--profile NAME` (default is `default`).
+## Every action
 
-## The commands
-
-`node cli.js '<json>' --session NAME`. Single-quote the JSON, double-quote the keys.
+`node cli.js '{"action":"help"}'` prints this list with one example each
+(it works even when the relay is down).
 
 | Goal | Command |
 | --- | --- |
-| Help (full list + examples) | `{"action":"help"}` |
-| See the page | `{"action":"snap"}` — title, url, text (incl. field values), items with `n`, `ref`, `role`, `name`, `value`, `checked`, `required`, `disabled` |
-| Click by ref (stable) | `{"action":"click","ref":"r12"}` — the reliable default |
-| Click snap item N | `{"action":"clickN","n":3}` — same page only |
-| Click by text | `{"action":"clickText","text":"Save"}` — forgiving (case, partial); `"exact":true` to pin |
-| Click by CSS selector | `{"action":"click","sel":"button.submit"}` |
-| Click by coordinates | `{"action":"clickXY","x":300,"y":500}` — use x/y from snap |
-| Hover | `{"action":"hover","ref":"r12"}` (or `text`/`n`/`sel`); `hoverXY` for coordinates |
-| Type into a field | `{"action":"type","ref":"r3","text":"hi"}` — sets the field to the text (also `sel`) |
-| Type into the focused field | `{"action":"type","text":"hello"}` — focused field, or the only field; else `ok:false` + `fields` |
-| Replace field content | `{"action":"replace","ref":"r3","text":"Ada"}` (same as type) |
-| Real keystrokes (masked/formatted fields) | `{"action":"typeKeys","ref":"r4","text":"4242424242424242"}` — use when `type` doesn't stick |
-| Set input/select value | `{"action":"fill","ref":"r5","value":"medium"}` — selects also match by option label |
-| Fill a shadow-DOM field | `{"action":"fillShadow","match":"email","value":"a@b.c"}` — `match` is a substring of the field's name/placeholder/label |
-| Press a key | `{"action":"key","key":"Enter"}` — any character or key name; `"meta":true` for Cmd+A/C/X/V/Z (`"shift":true` + z = redo) |
-| Inspect form fields | `{"action":"form"}` — fields of the open dialog (or page): ref, name, role, value, required, disabled, options, plus errors |
-| Open dialog text | `{"action":"dialog"}` — the top visible dialog |
-| Find text position | `{"action":"findText","text":"Total"}` — also matches field values |
-| Read a long page | `{"action":"read"}` — 12000 chars of page text; `"offset":12000` continues |
-| Navigate (waits for load) | `{"action":"navigate","url":"https://example.com"}` — absolute URL; `loaded:false` if >15s, `ok:false` if the URL did not change |
-| List tabs | `{"action":"tabs"}` |
-| Screenshot | `{"action":"shot"}` (to `~/.pilot/shots/`; `--out FILE` to choose) |
+| Get your tab | `{"action":"claim"}` |
+| Open a URL (waits for load) | `{"action":"navigate","url":"https://example.com"}` |
+| See the page | `{"action":"snap"}` — `"filter":"interactive"` items only, `"full":true` JSON |
+| Click | `{"action":"click","ref":"p1r3"}` |
+| Click by text | `{"action":"clickText","text":"Sign in"}` |
+| Type into a field | `{"action":"type","ref":"p1r4","text":"hello"}` — `"text":""` needs `"clear":true` |
+| Real keystrokes (masked fields) | `{"action":"typeKeys","ref":"p1r4","text":"4242"}` |
+| Set a select, date, time, number, color | `{"action":"fill","ref":"p1r5","value":"Medium"}` |
+| Upload a file | `{"action":"upload","ref":"p1r6","path":"/abs/path/file.pdf"}` |
+| Drag and drop | `{"action":"drag","from":"p1r2","to":"p1r9"}` |
+| Press a key | `{"action":"key","key":"Enter"}` — `"meta":true` for Cmd+A/C/V/Z |
+| Hover | `{"action":"hover","ref":"p1r3"}` |
+| Scroll | `{"action":"scroll","dy":800}` / `"to":"bottom"` / `"ref":"p1r40"` |
+| Wait | `{"action":"wait","text":"Done"}` / `"sel":"#result"` / `"gone":"Loading"` / `"ms":1000` |
+| Back / forward | `{"action":"back"}` / `{"action":"forward"}` |
+| Main article text | `{"action":"text"}` |
+| All page text | `{"action":"read"}` — `"offset":12000` for more |
+| Find text (with refs) | `{"action":"findText","text":"Total"}` |
+| Form fields, errors, missing | `{"action":"form"}` |
+| On-page dialog + last alert | `{"action":"dialog"}` |
+| Dialog answers | `{"action":"dialogPolicy","accept":true,"promptText":"yes"}` |
+| Run JavaScript | `{"action":"eval","js":"document.title"}` |
+| Console errors | `{"action":"console","level":"error"}` |
+| Network requests | `{"action":"network","failed":true}` |
+| Screenshot | `{"action":"shot"}` then `./ocr FILE` (exit 3 = no text) |
+| User's active tab | `{"action":"activeTab"}` |
+| Close your tab(s) | `{"action":"release"}` |
+| Stale Pilot tabs | `{"action":"cleanup"}` (dry run), `"apply":true` closes them |
 
-## Sessions — pin your own tab so nothing hijacks it
+## Replies
 
-**Always drive through a session.** `claim` once, then put `--session NAME` on every
-command. The pin survives across CLI invocations (`~/.pilot/session.json`).
+- `ok:true` — it worked. `value` has the data (`clicked`, `valueNow`, ...).
+- `ok:false` — it did not. `error` says why, `hint` says what to do.
+- `via` says how input went in: `cdp` (real input, normal), `native-setter`
+  (date/number fields), `synthetic-*` (fallback; `cdpNote` explains why, for
+  example a password manager's frame blocks the debugger).
+- `navigated:true` — the page changed. Snap again.
+- `opened:{tabId,url}` — a new background tab. `--tab ID` drives it.
+- `dialog:{type,message,accepted}` — an alert/confirm/prompt was answered.
 
-```sh
-node cli.js '{"action":"claim"}' --session NAME   # get/claim a dedicated tab
-node cli.js '{"action":"guard"}' --session NAME   # tab drifted? pull it back
-node cli.js '{"action":"release"}' --session NAME # close the tab and forget it
-node cli.js --sessions                            # list every session's pinned tab
-```
+## Before you start
 
-- Different `--session` per task (e.g. `chatgpt`, `checkout`) — two jobs never collide.
-- `--tab ID` drives one specific tab for a single command without touching the pin.
-- Same window, different tabs: separate sessions. Own agent window: `claim --new-window`.
-  Different Chrome profiles: `--profile work` vs `--profile personal`.
-- Hard limit: one debugger per tab (Chrome's rule). Two agents must not drive the
-  SAME tab at once; own sessions → no contention.
-- Every `claim` drops pins whose tab is gone and auto-releases sessions idle >24h.
-- Driven tabs sit in a yellow "Pilot" tab group. Default claim puts the tab in the
-  window Marcello is using, as a background tab; `--new-window` uses one unfocused
-  agent window per profile instead. Either way Pilot never brings it forward.
+1. Relay: `curl -s http://127.0.0.1:8756/` shows `{"server":"pilot","profiles":[...]}`.
+   If it is down: `node server.js &` in the pilot folder.
+2. Empty `profiles` = the extension is not connected. It auto-connects. If it
+   stays empty, ask the user ONCE to click **Connect** in the Pilot popup.
+3. Commands are never queued. A command for a profile that is not connected
+   fails at once with "not connected"; nothing runs later by surprise.
 
-## Reading screenshots — no API key needed
+## Sessions and cleanup
 
-```sh
-node cli.js '{"action":"shot"}' --out /tmp/page.jpg --session myjob
-./ocr /tmp/page.jpg          # text lines (macOS Vision, local)
-./ocr /tmp/page.jpg --json   # boxes + confidence
-```
-
-Prefer OCR for reading screenshot text; use a vision model only for visual layout.
-For plain text content, `snap` (`.text`) is cheaper than a screenshot.
+- One `--session` per task. Two tasks never share a tab.
+- `node cli.js --sessions` lists every session, its tab and idle time.
+- `release` closes your tab and every tab it opened. A tab the user is
+  looking at is never closed, only taken out of the yellow Pilot group.
+- Sessions idle for 30 minutes (Options) are released by the extension.
+- `node cli.js gc` releases only stale sessions, never live ones.
+- `--new-window` on claim uses a separate unfocused agent window.
+- `--profile NAME` targets another connected Chrome profile.
 
 ## Troubleshooting
 
-- `timeout — is the relay running?` → start it: `node server.js` (in the pilot dir).
-- `"queued": true` → that profile is not connected. Check `--status`; if genuinely
-  disconnected, ask the user once to click Connect in the popup.
-- `unknown action` → the extension is running old code. Send `{"action":"reload"}`,
-  wait 3s; it auto-reconnects with the new code.
-- Screenshot empty/black → the tab may be discarded; `navigate` first to wake it.
-- Clicks land but nothing happens → the page may use a dialog or a shadow DOM;
-  try `dialog`, `form`, or `fillShadow`.
+- `cannot reach the Pilot relay` → start it: `node server.js &`.
+- `not connected` → see "Before you start" step 2.
+- `no reply from Chrome within ...` → the page is stuck; run `{"action":"status"}`, then snap.
+- `page changed since that snap` → snap again and use the new refs.
+- `no tab for session X — run claim first` → run claim (check the name for typos).
+- `the page did not answer within 8s` → the page is busy or loading; `wait`, then snap.
+- After updating Pilot's code only: `{"action":"reload"}`, wait 4 seconds.
 
 ## Handing Pilot to a small model
 
-`eval/prompt.md` is a battle-tested per-turn instruction block for small models
-(one JSON action per turn, no prose). `eval/drive.mjs` runs a task end to end
-with any OpenRouter model:
+`eval/prompt.md` is the per-turn instruction block for small models (one JSON
+action per turn). `eval/drive.mjs` runs a task end to end with any OpenRouter
+model:
 
 ```sh
 node eval/drive.mjs "Order a medium pizza with bacon on https://httpbin.org/forms/post ..."
 ```
-
-GLM 5.3 Flash completes form-fill and search-and-extract tasks in ~13 steps
-with that prompt. Key details that made it work: numbered snap items, checked
-state on toggles, `checkedNow` in click results, and recovery hints on every
-failure.

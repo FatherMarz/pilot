@@ -62,7 +62,8 @@ node cli.js --status
 node cli.js '{"action":"claim"}' --session myjob
 node cli.js '{"action":"navigate","url":"https://example.com"}' --session myjob
 node cli.js '{"action":"snap"}' --session myjob
-node cli.js '{"action":"clickN","n":3}' --session myjob
+node cli.js '{"action":"click","ref":"p1r3"}' --session myjob
+node cli.js '{"action":"release"}' --session myjob
 ```
 
 The extension connects on browser start (turn **Auto-connect** off in Options
@@ -72,11 +73,17 @@ browser restart.
 
 ## The loop a driving model follows
 
-`snap` returns the page text plus a numbered list of clickable items;
-`clickN` clicks by that number; snap again confirms. No selectors, no
-coordinates, no exact spelling needed. Every reply has `ok`; failures carry
-recovery data — a failed click returns `visibleTexts`, a failed fill returns
-`fields`, a failed select fill returns `options`, toggles report `checkedNow`.
+`snap` prints one short line per clickable item, ref first
+(`p1r3 button "Save"`), on-screen items first, under 4 KB for a typical page;
+`"full":true` returns the JSON. Act on a ref, then snap again. A ref carries
+its page number (`p1`), so a ref from a page that has since navigated is
+refused ("page changed since that snap — snap again") instead of hitting a
+different element. Every reply has one `ok` at the top; failures carry
+`error`, `hint` and recovery data (`visibleTexts`, `fields`, `options`).
+Input actions report `navigated:true` when the page changed,
+`opened:{tabId,url}` when a new tab opened (always in the background), and
+`dialog:{...}` when an alert/confirm/prompt was answered. Iframes are read
+too: their items carry `[frame N]` and their refs work like any other.
 
 ## CLI reference
 
@@ -88,10 +95,11 @@ node cli.js '{"action":"help"}'   # full command list with examples
 
 ### Sessions — one tab per agent
 
-Every agent passes `--session NAME`. The first command with a new session
-claims a dedicated tab (a background tab in the window you are using) and
-pins it on disk; later commands drive that same tab, so two agents never
-hijack each other. `--profile NAME` picks the connected Chrome profile.
+Every agent passes `--session NAME` and runs `claim` once: it pins a
+dedicated tab (a background tab in the window you are using) on disk; later
+commands drive that same tab, so two agents never hijack each other. A
+command on a session that was never claimed fails with "run claim first"
+(a typo never opens a stray tab). `--profile NAME` picks the connected Chrome profile.
 `--new-window` uses a separate per-profile agent window instead, `--window ID`
 a specific one. `--tab ID` overrides the pin for one call.
 
@@ -107,10 +115,18 @@ idle time, so an agent can see the whole board before acting.
 ```sh
 node cli.js '{"action":"claim"}' --session NAME     # pin a dedicated tab (reuses/adopts first)
 node cli.js '{"action":"guard"}' --session NAME     # pull the tab back if it drifted
-node cli.js '{"action":"release"}' --session NAME   # close the pinned tab, forget it
+node cli.js '{"action":"release"}' --session NAME   # close the tab and the tabs it opened
 node cli.js --sessions --profile NAME               # every session: alive, url, idle
-node cli.js gc --keep NAME --profile NAME           # release all others, sweep Pilot groups
+node cli.js gc                                      # release STALE sessions only, sweep orphan Pilot tabs
+node cli.js '{"action":"cleanup"}'                  # dry run: what a sweep would close ("apply":true does it)
 ```
+
+Cleanup is built in: the extension remembers each session's tab and the tabs
+it opened. `release` closes them; sessions idle longer than the Options limit
+(default 30 min) are released by the extension itself; orphan Pilot tabs
+(blank, discarded, or untouched past the limit) are swept on start and on
+every claim. A tab the user is looking at is never closed, only taken out of
+the Pilot group; a tab the user moved out of the group is left alone.
 
 One hard limit: Chrome allows one debugger per tab, so two agents must not
 drive the same tab at once — separate sessions never contend.
@@ -121,14 +137,15 @@ drive the same tab at once — separate sessions never contend.
 # See
 node cli.js '{"action":"snap"}'                      # title, url, text, numbered clickable items
 node cli.js '{"action":"read"}'                      # 12000 chars of page text; {"offset":12000} continues
-node cli.js '{"action":"form"}'                      # inputs/selects/radios + visible error text
+node cli.js '{"action":"form"}'                      # every field + field-bound errors + missing required
 node cli.js '{"action":"dialog"}'                    # open dialog text
 node cli.js '{"action":"findText","text":"Total"}'   # where text sits on the page
 node cli.js '{"action":"hrefs","text":"docs"}'       # links matching text/href
 node cli.js '{"action":"shot"}'                      # screenshot → ~/.pilot/shots/ (or --out FILE)
 
 # Act
-node cli.js '{"action":"clickN","n":3}'              # click item 3 from the last snap
+node cli.js '{"action":"click","ref":"p1r3"}'        # click by ref from the last snap
+node cli.js '{"action":"clickN","n":3}'              # click item 3 of the last snap
 node cli.js '{"action":"clickText","text":"Save"}'   # forgiving text match ("exact":true to pin)
 node cli.js '{"action":"click","sel":"button.x"}'    # CSS selector
 node cli.js '{"action":"clickXY","x":100,"y":200}'   # coordinates
@@ -140,6 +157,18 @@ node cli.js '{"action":"typeKeys","sel":"#card","text":"4242"}' # real per-char 
 node cli.js '{"action":"fill","sel":"[name=size]","value":"medium"}' # selects also match by option label
 node cli.js '{"action":"fillShadow","match":"email","value":"a@b.c"}' # fields inside shadow DOM
 node cli.js '{"action":"key","key":"Enter"}'         # "meta":true, "shift":true
+node cli.js '{"action":"upload","ref":"p1r6","path":"/abs/file.pdf"}' # file inputs
+node cli.js '{"action":"drag","from":"p1r2","to":"p1r9"}'  # drag and drop
+node cli.js '{"action":"scroll","dy":800}'           # or "to":"top"|"bottom", or "ref" to bring into view
+node cli.js '{"action":"wait","text":"Done"}'        # or "sel", "gone", "ms"; "timeout" (default 10s)
+node cli.js '{"action":"back"}'                      # and forward
+node cli.js '{"action":"dialogPolicy","accept":false,"once":true}' # how to answer the next JS dialog
+
+# Inspect
+node cli.js '{"action":"text"}'                      # main content text, no nav/header/footer
+node cli.js '{"action":"eval","js":"document.title"}' # JSON result, main frame, with a timeout
+node cli.js '{"action":"console","level":"error"}'   # recent console messages
+node cli.js '{"action":"network","failed":true}'     # recent requests
 
 # Tabs
 node cli.js '{"action":"navigate","url":"https://x"}'  # waits for the load (15s cap)
@@ -152,8 +181,10 @@ node cli.js '{"action":"newHarnessTab","url":"https://x"}'
 node cli.js '{"action":"reload"}'                      # reload the extension itself
 ```
 
-Commands sent to a profile that isn't connected are queued on the relay and
-delivered the moment that profile connects.
+Commands are never queued: a page action for a profile that isn't connected
+fails at once ("not connected — ask the user to click Connect"), so nothing
+replays late after the CLI reported a failure. Read-only metadata (status,
+tabs) waits up to 4 seconds for a reconnecting extension, then fails.
 
 ## Screenshots
 
@@ -164,7 +195,7 @@ the path:
 
 ```sh
 ./ocr ~/.pilot/shots/12345.jpg          # plain text lines
-./ocr ~/.pilot/shots/12345.jpg --json   # per-line boxes + confidence
+./ocr ~/.pilot/shots/12345.jpg --json   # per-line boxes + confidence (exit 3 = no text found)
 ```
 
 ## Small-model eval

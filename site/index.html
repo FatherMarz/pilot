@@ -335,7 +335,7 @@ Read screenshots locally, no vision API key:
 - ./ocr /tmp/page.jpg          # plain text lines (macOS Vision, on-device)
 - ./ocr /tmp/page.jpg --json   # boxes + confidence
 
-Workflow: look before you click (snap first), then one action at a time, then snap/dialog to confirm the result. Commands to a profile that isn't connected are queued and delivered when the user clicks Connect.`;
+Workflow: look before you click (snap first), then one action at a time, then snap/dialog to confirm the result. Commands to a profile that isn't connected fail at once; ask the user to click Connect.`;
 
   function wireCopy(buttonId) {
     const el = document.getElementById(buttonId);

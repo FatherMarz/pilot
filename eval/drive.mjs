@@ -101,7 +101,7 @@ for (let step = 1; step <= MAX_STEPS; step++) {
     continue;
   }
   let result = pilot(cmd);
-  if (result.length > 2600) result = result.slice(0, 2600) + "\n...[truncated]";
+  if (result.length > 4200) result = result.slice(0, 4200) + "\n...[truncated]";
   log(`pilot step ${step}`, `${cmd}\n--->\n${result}`);
   console.log(`step ${step}: ${cmd.slice(0, 110)}`);
   messages.push({ role: "user", content: `RESULT:\n${result}` });
