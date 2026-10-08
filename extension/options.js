@@ -5,8 +5,8 @@ const DEFAULTS = {
   autoConnect: true,
   trustedInput: true,
   autoStartRelay: true,
-  groupName: "Harness",
-  groupColor: "red",
+  groupName: "Pilot",
+  groupColor: "yellow",
   visualFeedback: true,
   screenshotMode: "auto",
   shotMaxWidth: 1280,
@@ -21,8 +21,8 @@ function load() {
     document.getElementById("autoConnect").checked = s.autoConnect !== false;
     document.getElementById("trustedInput").checked = s.trustedInput !== false;
     document.getElementById("autoStartRelay").checked = !!s.autoStartRelay;
-    document.getElementById("groupName").value = s.groupName;
-    document.getElementById("groupColor").value = s.groupColor;
+    document.getElementById("groupName").value = s.groupName === "Harness" ? "Pilot" : s.groupName;
+    document.getElementById("groupColor").value = s.groupColor === "red" ? "yellow" : s.groupColor;
     document.getElementById("visualFeedback").checked = s.visualFeedback !== false;
     document.getElementById("screenshotMode").value = s.screenshotMode;
     document.getElementById("shotMaxWidth").value = s.shotMaxWidth;
@@ -38,7 +38,7 @@ function save() {
     autoConnect: document.getElementById("autoConnect").checked,
     trustedInput: document.getElementById("trustedInput").checked,
     autoStartRelay: document.getElementById("autoStartRelay").checked,
-    groupName: document.getElementById("groupName").value.trim() || "Harness",
+    groupName: document.getElementById("groupName").value.trim() || "Pilot",
     groupColor: document.getElementById("groupColor").value,
     visualFeedback: document.getElementById("visualFeedback").checked,
     screenshotMode: document.getElementById("screenshotMode").value,

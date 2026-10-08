@@ -20,8 +20,8 @@ importScripts("keys.js");
 const DEFAULT_SETTINGS = {
   relayUrl: "ws://127.0.0.1:8756",
   profileName: "default",
-  groupName: "Harness",
-  groupColor: "red",
+  groupName: "Pilot",
+  groupColor: "yellow",
   visualFeedback: true,
   shotMaxWidth: 1280,
   shotFormat: "jpeg", // "jpeg" | "png"
@@ -50,6 +50,15 @@ function loadSettings() {
   return new Promise((resolve) => {
     chrome.storage.sync.get(DEFAULT_SETTINGS, (got) => {
       settings = { ...DEFAULT_SETTINGS, ...got };
+      // Migrate the old defaults ("Harness" / red) to "Pilot" / yellow.
+      // Custom values are left alone.
+      const fix = {};
+      if (got.groupName === "Harness") fix.groupName = "Pilot";
+      if (got.groupColor === "red") fix.groupColor = "yellow";
+      if (Object.keys(fix).length) {
+        Object.assign(settings, fix);
+        chrome.storage.sync.set(fix);
+      }
       resolve(settings);
     });
   });
@@ -236,7 +245,7 @@ async function cdpKeyPress(tabId, events) {
 
 // Actions that read or manage browser state without driving a page. They must
 // not resolve a target tab: doing so grabs the user's ACTIVE tab and drags it
-// into the Harness group as a side effect of a mere listing.
+// into the Pilot group as a side effect of a mere listing.
 const METADATA_ACTIONS = new Set([
   "ping", "reload", "status", "tabs", "windows", "activeTab",
   "tabInfo", "closeTab", "harnessTab", "newHarnessTab", "gc",
@@ -278,14 +287,17 @@ async function dispatchAction(msg, reply) {
         return { id: t.id, windowId: t.windowId, url: t.url || "", title: t.title || "", groupId: t.groupId };
       }
       case "gc": {
-        // Sweep leftover agent tabs: every about:blank tab in a Harness group
+        // Sweep leftover agent tabs: every about:blank tab in a Pilot group (or a legacy "Harness" group)
         // that no live session still pins, plus unfocused agent windows that
-        // hold nothing but blank Harness tabs. Real pages and focused windows
+        // hold nothing but blank Pilot tabs. Real pages and focused windows
         // are never touched.
         const keep = new Set(msg.keepTabIds || []);
         const removed = [];
         const ungrouped = [];
-        const gcGroups = await chrome.tabGroups.query({ title: settings.groupName }).catch(() => []);
+        const gcGroups = [];
+        for (const title of new Set([settings.groupName, "Harness"])) {
+          gcGroups.push(...await chrome.tabGroups.query({ title }).catch(() => []));
+        }
         for (const g of gcGroups) {
           const tabs = await chrome.tabs.query({ groupId: g.id });
           const survivors = [];
@@ -299,7 +311,7 @@ async function dispatchAction(msg, reply) {
             }
           }
           // Real pages the user (or a stray claim) dragged in: ungroup them so
-          // the Harness group disappears instead of holding their tabs hostage.
+          // the group disappears instead of holding their tabs hostage.
           if (survivors.length) {
             await chrome.tabs.ungroup(survivors).catch(() => {});
             ungrouped.push(...survivors);
@@ -660,7 +672,7 @@ function blobToDataUrl(blob) {
 // ── Tab helpers ─────────────────────────────────────────────────────────────
 
 // Mark the tab the harness is driving so it is obvious on screen: a colored
-// tab group (name/color from Options; default red "Harness"). The group is
+// tab group (name/color from Options; default yellow "Pilot"). The group is
 // created in the tab's OWN window: without createProperties.windowId Chrome
 // builds it in the last-focused window and moves the tab there, which is how
 // a claimed agent-window tab ended up in the user's window (and the empty

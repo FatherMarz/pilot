@@ -102,7 +102,7 @@
   .dots i { width: 10px; height: 10px; border-radius: 50%; background: #2c3038; }
   .tab { display: flex; align-items: center; gap: 6px; font: 12px var(--mono); color: var(--dim); padding: 4px 10px; border-radius: 8px; }
   .tab.on { background: var(--panel); color: var(--text); }
-  .group { font: 600 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; padding: 2px 7px; border-radius: 5px; background: var(--red); color: #fff; }
+  .group { font: 600 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; padding: 2px 7px; border-radius: 5px; background: #ffd23f; color: #0a0b0d; }
   .page { position: relative; height: 300px; padding: 26px; }
   .sk { height: 10px; border-radius: 5px; background: #23272e; margin-bottom: 10px; }
   .row { display: flex; gap: 12px; margin-top: 26px; }
@@ -195,7 +195,7 @@
       <div class="win">
         <div class="bar">
           <span class="dots"><i></i><i></i><i></i></span>
-          <span class="tab"><span class="group">Harness</span></span>
+          <span class="tab"><span class="group">Pilot</span></span>
           <span class="tab on">dashboard</span>
           <span class="tab">docs</span>
         </div>
@@ -229,7 +229,7 @@ node cli.js '{"action":"shot"}' --profile work</pre>
       <div class="feat">
         <span class="n">02</span>
         <h3>Works in the background</h3>
-        <p>Pilot clicks, types and takes screenshots in <b>inactive tabs</b> while you keep working. Driven tabs go in a coloured <b>Harness</b> group, so you can see what the agent touches.</p>
+        <p>Pilot clicks, types and takes screenshots in <b>inactive tabs</b> while you keep working. Driven tabs go in a yellow <b>Pilot</b> group, so you can see what the agent touches.</p>
         <pre><span class="c"># no tab switch, no stolen focus</span>
 node cli.js '{"action":"snap"}'</pre>
       </div>

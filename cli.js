@@ -8,7 +8,7 @@
 //
 // ── SESSIONS (per-agent tab pinning) ───────────────────────────────────────────
 // The extension can drive one tab per command, but when several agents (or the
-// harness and another app) share a Chrome profile, "the first tab in the Harness
+// harness and another app) share a Chrome profile, "the first tab in the Pilot
 // group" is a shared resource and gets hijacked. A SESSION pins one dedicated tab
 // id on disk and injects it into every tab-touching command, so each agent owns a
 // tab and another driver can no longer steal it.
@@ -304,7 +304,7 @@ const HELP = {
     claim: `{"action":"claim"} --session NAME — pin a dedicated tab (reuses yours, then adopts an idle one; --no-reuse forces fresh; --stale-minutes N overrides the 30-min idle threshold)`,
     guard: `{"action":"guard"} --session NAME — pull the tab back if it drifted`,
     release: `{"action":"release"} --session NAME — close the tab and forget it`,
-    gc: `node cli.js gc --keep SESSION — release every other session, close its tab, sweep empty Harness tabs/windows`,
+    gc: `node cli.js gc --keep SESSION — release every other session, close its tab, sweep empty Pilot tabs/windows`,
   },
   flags: `--session NAME (always) | --profile NAME | --tab ID | --out FILE | --status | --sessions | --no-reuse | --stale-minutes N`,
   errors: `every reply has "ok". On ok:false read "error" and "hint"; most failures include the visible texts or fields to try next.`,
@@ -369,7 +369,7 @@ async function run(cmd, opts) {
       }
     }
     // No live pin of our own: adopt an idle session's tab before opening a
-    // fresh one. Keeps agent windows and Harness groups from multiplying.
+    // fresh one. Keeps agent windows and Pilot groups from multiplying.
     if (!opts.noReuse) {
       const idle = await findAdoptable(opts);
       if (idle) {

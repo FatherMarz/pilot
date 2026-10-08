@@ -109,7 +109,7 @@ node cli.js '{"action":"claim"}' --session NAME     # pin a dedicated tab (reuse
 node cli.js '{"action":"guard"}' --session NAME     # pull the tab back if it drifted
 node cli.js '{"action":"release"}' --session NAME   # close the pinned tab, forget it
 node cli.js --sessions --profile NAME               # every session: alive, url, idle
-node cli.js gc --keep NAME --profile NAME           # release all others, sweep Harness groups
+node cli.js gc --keep NAME --profile NAME           # release all others, sweep Pilot groups
 ```
 
 One hard limit: Chrome allows one debugger per tab, so two agents must not
@@ -200,7 +200,7 @@ Pilot options page (right-click the icon → Options):
 - **Trusted input** — clicks/keys via the Chrome debugger (on by default)
 - **Auto-connect on browser start** — on by default
 - **Auto-start the relay on Connect** — on by default
-- **Driven-tab group name and color** — default `Harness` / red
+- **Driven-tab group name and color** — default `Pilot` / yellow
 - **Bring the driven tab forward on every action** — off by default
 - **Visual feedback** (glow + cursor) — off for clean recordings
 - **Screenshot method / max width / format**
