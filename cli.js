@@ -20,13 +20,17 @@
 //   --new-window        use the profile's own agent window, not the user's
 //   --sessions          print the tab pins and per-profile windows
 //   claim               (action) get/claim a dedicated tab and print its id
-//   release             (action) close the pinned tab and forget it
+//   release             (action) close the pinned tab (and tabs it opened), forget it
+//
+// A session must be claimed before it can drive anything: a page action on an
+// unknown session (a typo, a forgotten claim) fails with "run claim first"
+// instead of quietly opening a new tab. A pinned tab that was closed fails
+// the same way and its pin is dropped.
 //   guard               (action) if the pinned tab drifted off the last URL, re-navigate back
 //
-// Default placement: one shared agent-window per profile (~/.pilot/windows.json).
-// The first claim in a profile creates it; every agent working in that profile
-// adds its own tab to that same window, so they never compete and the user's
-// own windows stay untouched.
+// Default placement: a background tab in the window the user is using (never
+// brought forward). --new-window uses one shared agent window per profile
+// (~/.pilot/windows.json) instead.
 //
 // The pin lives at ~/.pilot/session.json: { NAME: { tabId, windowId, url } }.
 //
@@ -38,6 +42,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const WebSocket = require("ws");
+const { KNOWN, helpText, unknownAction, shapeReply, formatSnap } = require("./format.js");
 
 const argv = process.argv.slice(2);
 const RELAY = process.env.PILOT_RELAY || "ws://127.0.0.1:8756";
@@ -205,7 +210,7 @@ function gcHint(opts) {
     return !lu || now - lu > staleMs(opts);
   }).length;
   if (stale < 3) return null;
-  return `${stale} stale of ${names.length} session(s) — run: node cli.js gc --keep ${opts.session}`;
+  return `${stale} stale of ${names.length} session(s) — run: node cli.js gc (releases only sessions idle over ${Math.round(staleMs(opts) / 60000)} min)`;
 }
 
 // ── per-profile shared agent window ─────────────────────────────────────────
@@ -262,64 +267,36 @@ async function claimTab(opts) {
   return created;
 }
 
-// Actions that never touch a tab (mirrors the extension's METADATA_ACTIONS plus
-// our own CLI-level convenience actions). They must not claim or create a tab.
+// Actions that never touch a tab: they must not resolve a session tab.
 const NON_TAB_ACTIONS = new Set([
   "ping", "status", "tabs", "windows", "groups", "activeTab", "tabInfo", "closeTab",
-  "harnessTab", "newHarnessTab", "reload", "claim", "release", "guard", "help", "gc",
+  "harnessTab", "newHarnessTab", "reload", "claim", "release", "guard", "help", "gc", "cleanup", "releaseTab",
 ]);
 
-// One screen, everything a driving model needs. Kept in the CLI so it works
-// even when the relay or the extension is down.
-const HELP = {
-  start: [
-    `claim a tab once:   node cli.js '{"action":"claim"}' --session myjob`,
-    `then reuse it:      add --session myjob to every command`,
-    `look before you click: snap first, act second, snap again to confirm`,
-    `claim is cheap by design: it reuses your tab, adopts an idle session's`,
-    `tab when one is free, and only opens a fresh tab as a last resort. Pass`,
-    `--no-reuse to force a new tab. If a hint offers gc, run it.`,
-  ],
-  commands: {
-    snap: `{"action":"snap"} — title, url, page text, numbered clickable items`,
-    clickN: `{"action":"clickN","n":3} — click item 3 from the last snap`,
-    ref: `every snap item has a stable "ref" (r12): {"action":"click","ref":"r12"} — also works on type, fill, hover; most reliable`,
-    clickText: `{"action":"clickText","text":"Save"} — forgiving match; add "exact":true to pin it`,
-    click: `{"action":"click","ref":"r12"} or {"action":"click","sel":"button.submit"}`,
-    clickXY: `{"action":"clickXY","x":300,"y":500} — viewport coordinates from snap`,
-    hoverXY: `{"action":"hoverXY","x":300,"y":500} — move mouse there, no click (reveals hover-only UI)`,
-    hover: `{"action":"hover","text":"Save"} — resolve by {text}/{n}/{sel}, move mouse onto it without clicking`,
-    type: `{"action":"type","ref":"r3","text":"hello"} — sets the field to the text; without ref/sel it types into the focused field. ok:false if the value did not stick`,
-    replace: `{"action":"replace","sel":"#name","text":"Ada"} — clear the field, then type`,
-    typeKeys: `{"action":"typeKeys","sel":"#card","text":"4242"} — real per-character keystrokes, for masked/formatted fields where type/fill isn't enough`,
-    fill: `{"action":"fill","ref":"r3","value":"medium"} — set a text field or select (selects match value or label)`,
-    fillShadow: `{"action":"fillShadow","match":"email","value":"a@b.c"} — reach fields inside shadow DOM`,
-    key: `{"action":"key","key":"Enter"} — any character or name; "meta":true for Cmd+A/C/X/V/Z, "shift":true`,
-    form: `{"action":"form"} — every field (ref, name, role, value, required, disabled) in the open dialog or page, plus errors`,
-    findText: `{"action":"findText","text":"Total"} — where text sits on the page`,
-    read: `{"action":"read"} — full page text (12000 chars); {"offset":12000} continues`,
-    dialog: `{"action":"dialog"} — text of the open dialog, null if none`,
-    navigate: `{"action":"navigate","url":"https://example.com"} — waits for the page to load`,
-    shot: `{"action":"shot"} — screenshot to ~/.pilot/shots; add --out FILE; read it with ./ocr FILE`,
-    tabs: `{"action":"tabs"} — every open tab with ids`,
-    claim: `{"action":"claim"} --session NAME — pin a dedicated tab (reuses yours, then adopts an idle one; --no-reuse forces fresh; --stale-minutes N overrides the 30-min idle threshold)`,
-    guard: `{"action":"guard"} --session NAME — pull the tab back if it drifted`,
-    release: `{"action":"release"} --session NAME — close the tab and forget it`,
-    gc: `node cli.js gc --keep SESSION — release every other session, close its tab, sweep empty Pilot tabs/windows`,
-  },
-  flags: `--session NAME (always) | --profile NAME | --tab ID | --out FILE | --status | --sessions | --no-reuse | --stale-minutes N`,
-  errors: `every reply has "ok". On ok:false read "error" and "hint"; most failures include the visible texts or fields to try next.`,
-};
+let exitCode = 0;
+function out(obj) {
+  if (obj && obj.ok === false) exitCode = 1;
+  console.log(typeof obj === "string" ? obj : JSON.stringify(obj));
+}
+
+// Tab ids of sessions that are still live (used within the stale threshold).
+function liveTabIds(opts, except) {
+  const sessions = loadSessions();
+  const now = Date.now();
+  return Object.entries(sessions)
+    .filter(([n, p]) => n !== except && p && p.tabId != null && now - (p.lastUsed || 0) <= staleMs(opts))
+    .map(([, p]) => p.tabId);
+}
 
 async function run(cmd, opts) {
   if (cmd && cmd.action === "help") {
-    console.log(JSON.stringify(HELP, null, 1));
+    console.log(helpText());
     return;
   }
 
   if (opts.status) {
     const status = await request({ action: "status" }, opts);
-    console.log(JSON.stringify(status, null, 1));
+    out(status);
     return;
   }
 
@@ -345,29 +322,38 @@ async function run(cmd, opts) {
       };
     }
     const staleCount = Object.values(view).filter((s) => s.stale).length;
-    const hint = staleCount >= 3
-      ? `${staleCount} stale session(s) — run: node cli.js gc --keep ${opts.session}`
-      : undefined;
+    const hint = staleCount >= 3 ? gcHint(opts) || undefined : undefined;
     console.log(JSON.stringify({ sessions: view, windows: loadWindows(), ...(hint ? { hint } : {}) }, null, 1));
     return;
   }
 
-  // Any real work on a session marks it fresh, so idle-time means idle.
-  touchSession(opts.session);
+  if (!KNOWN.has(cmd.action)) {
+    out(unknownAction(cmd.action));
+    return;
+  }
 
   // ── claim: get or create a dedicated tab and pin it ───────────────────────
   if (cmd.action === "claim") {
+    touchSession(opts.session);
     const pruned = await pruneSessions(opts);
     const prunedNote = pruned.dropped.length || pruned.released.length ? { pruned } : {};
+    const hint = gcHint(opts);
+    const done = async (payload) => {
+      // Every claim also sweeps orphan Pilot tabs (blank, crashed, or idle
+      // past the limit) that no live session pins.
+      const keep = liveTabIds(opts).concat(payload.tabId != null ? [payload.tabId] : []);
+      const sw = await request({ action: "cleanup", apply: true, keepTabIds: keep }, opts).catch(() => null);
+      const swept = sw && sw.ok && sw.value && sw.value.close ? sw.value.close.length : 0;
+      out({ ...payload, ...prunedNote, ...(swept ? { swept } : {}), ...(hint ? { hint } : {}) });
+    };
     const existing = getSession(opts.session);
     if (existing && existing.tabId != null) {
-      // Verify the pinned tab still exists before reusing it.
       const info = await request({ action: "tabInfo", tabId: existing.tabId }, opts);
       if (info.ok && info.value) {
         touchSession(opts.session);
-        console.log(JSON.stringify({ ok: true, session: opts.session, tabId: existing.tabId, windowId: info.value.windowId ?? null, url: info.value.url, reused: true, ...prunedNote, ...(gcHint(opts) ? { hint: gcHint(opts) } : {}) }, null, 1));
-        return;
+        return done({ ok: true, session: opts.session, tabId: existing.tabId, windowId: info.value.windowId ?? null, url: info.value.url, reused: true });
       }
+      if (info.notConnected) return out(shapeReply(info));
     }
     // No live pin of our own: adopt an idle session's tab before opening a
     // fresh one. Keeps agent windows and Pilot groups from multiplying.
@@ -378,50 +364,57 @@ async function run(cmd, opts) {
         delete sessions[idle.name];
         sessions[opts.session] = { lastUsed: Date.now(), tabId: idle.pin.tabId, url: null, windowId: idle.windowId, profile: opts.profile || idle.pin.profile || null, adoptedFrom: idle.name };
         saveSessions(sessions);
-        console.log(JSON.stringify({ ok: true, session: opts.session, tabId: idle.pin.tabId, windowId: idle.windowId, url: idle.url, reused: true, adoptedFrom: idle.name, ...(gcHint(opts) ? { hint: gcHint(opts) } : {}) }, null, 1));
-        return;
+        return done({ ok: true, session: opts.session, tabId: idle.pin.tabId, windowId: idle.windowId, url: idle.url, reused: true, adoptedFrom: idle.name });
       }
     }
     const created = await claimTab(opts);
-    if (!created.ok) {
-      console.error(JSON.stringify({ ok: false, error: created.error }, null, 1));
-      process.exit(1);
-    }
+    if (!created.ok) return out(shapeReply(created));
     setSession(opts.session, { tabId: created.value.tabId, url: null, windowId: created.value.windowId ?? null, profile: opts.profile || null });
-    console.log(JSON.stringify({ ok: true, session: opts.session, tabId: created.value.tabId, windowId: created.value.windowId ?? null, profile: opts.profile || null, reused: false, ...prunedNote, ...(gcHint(opts) ? { hint: gcHint(opts) } : {}) }, null, 1));
-    return;
+    return done({ ok: true, session: opts.session, tabId: created.value.tabId, windowId: created.value.windowId ?? null, profile: opts.profile || null, reused: false, hint: "now navigate: {\"action\":\"navigate\",\"url\":\"https://...\"}" });
   }
 
-  // ── release: close the pinned tab and forget it ───────────────────────────
+  // ── release: close the pinned tab (and every tab it opened), forget it ────
   if (cmd.action === "release") {
     const existing = getSession(opts.session);
+    let res = null;
     if (existing && existing.tabId != null) {
-      await request({ action: "closeTab", tabId: existing.tabId }, opts).catch(() => {});
+      res = await request({ action: "releaseTab", tabId: existing.tabId }, opts).catch((e) => ({ ok: false, error: String(e.message || e) }));
     }
     clearSession(opts.session);
-    console.log(JSON.stringify({ ok: true, session: opts.session, released: true }, null, 1));
+    const v = res && res.ok ? res.value : null;
+    out({ ok: true, session: opts.session, released: true, ...(v ? { closed: v.closed, ...(v.ungrouped.length ? { ungrouped: v.ungrouped, note: v.note } : {}), ...(v.leftOpen.length ? { leftOpen: v.leftOpen } : {}) } : {}), ...(res && !res.ok ? { warning: res.error } : {}) });
     return;
   }
 
-  // ── gc: release every stale session pin, then sweep leftover agent tabs ───
+  // ── gc: release STALE sessions only, then sweep orphan Pilot tabs ─────────
   if (cmd.action === "gc") {
     const keep = opts.keep || opts.session;
     const sessions = loadSessions();
+    const now = Date.now();
     const released = [];
-    const keepTabs = [];
     for (const [name, pin] of Object.entries(sessions)) {
-      if (name === keep) {
-        if (pin && pin.tabId != null) keepTabs.push(pin.tabId);
-        continue;
-      }
+      if (name === keep) continue;
+      const idle = now - ((pin && pin.lastUsed) || 0);
+      if (idle <= staleMs(opts)) continue; // live: someone is using it
       if (pin && pin.tabId != null) {
-        await request({ action: "closeTab", tabId: pin.tabId }, { ...opts, profile: pin.profile || opts.profile }).catch(() => {});
+        await request({ action: "releaseTab", tabId: pin.tabId }, { ...opts, profile: pin.profile || opts.profile }).catch(() => {});
       }
       released.push(name);
     }
-    saveSessions(Object.fromEntries(Object.entries(sessions).filter(([n]) => n === keep)));
-    const sweep = await request({ action: "gc", keepTabIds: keepTabs }, opts).catch(() => ({ ok: false, error: "extension unreachable" }));
-    console.log(JSON.stringify({ ok: true, kept: keep, released, sweep: sweep.ok ? sweep.value : sweep.error }, null, 1));
+    const fresh = loadSessions();
+    for (const n of released) delete fresh[n];
+    saveSessions(fresh);
+    const keepTabs = Object.values(fresh).map((p) => p && p.tabId).filter((x) => x != null);
+    const sweep = await request({ action: "cleanup", apply: true, keepTabIds: keepTabs }, opts).catch((e) => ({ ok: false, error: String(e.message || e) }));
+    out({ ok: true, released, kept: Object.keys(fresh), sweep: sweep.ok ? { closed: (sweep.value.close || []).length, ungrouped: (sweep.value.ungroup || []).length } : sweep.error });
+    return;
+  }
+
+  // ── cleanup: dry run by default; live sessions are always protected ──────
+  if (cmd.action === "cleanup") {
+    const keep = Object.values(loadSessions()).filter((p) => p && p.tabId != null && Date.now() - (p.lastUsed || 0) <= staleMs(opts)).map((p) => p.tabId);
+    const res = await request({ action: "cleanup", apply: !!cmd.apply, keepTabIds: keep.concat(cmd.keepTabIds || []) }, opts);
+    out(shapeReply(res));
     return;
   }
 
@@ -429,63 +422,73 @@ async function run(cmd, opts) {
   if (cmd.action === "guard") {
     const existing = getSession(opts.session);
     if (!existing || existing.tabId == null) {
-      console.log(JSON.stringify({ ok: true, guarded: false, note: "no pinned tab" }, null, 1));
+      out({ ok: false, error: "no tab for session " + opts.session + " — run claim first", hint: `node cli.js '{"action":"claim"}' --session ${opts.session}` });
       return;
     }
     const info = await request({ action: "tabInfo", tabId: existing.tabId }, opts);
     if (!info.ok || !info.value) {
-      // The tab is gone. Re-claim a fresh one.
-      const created = await claimTab(opts);
-      setSession(opts.session, { tabId: created.value.tabId, url: null, windowId: created.value.windowId ?? null, profile: opts.profile || null });
-      console.log(JSON.stringify({ ok: true, guarded: false, note: "tab was gone — re-claimed", tabId: created.value.tabId }, null, 1));
+      if (/no tab|gone/i.test(String(info.error || ""))) clearSession(opts.session);
+      out({ ok: false, error: "the tab for session " + opts.session + " is gone — run claim", hint: `node cli.js '{"action":"claim"}' --session ${opts.session}` });
       return;
     }
+    touchSession(opts.session);
     const curUrl = info.value.url || "";
     const want = existing.url;
     if (want && curUrl !== want) {
-      await request({ action: "navigate", tabId: existing.tabId, url: want }, opts);
-      console.log(JSON.stringify({ ok: true, guarded: true, from: curUrl, to: want }, null, 1));
+      const r = await request({ action: "navigate", tabId: existing.tabId, url: want, session: opts.session }, opts);
+      out({ ...shapeReply(r), guarded: true, from: curUrl, to: want });
       return;
     }
-    console.log(JSON.stringify({ ok: true, guarded: false, url: curUrl }, null, 1));
+    out({ ok: true, guarded: false, url: curUrl });
     return;
   }
 
-  // ── every tab-touching command pins its session tab ───────────────────────
+  // ── every tab-touching command drives the session's pinned tab ────────────
   if (!NON_TAB_ACTIONS.has(cmd.action)) {
-    // Precedence: (1) an explicit --tab flag, (2) a tabId already in the command
-    // JSON, (3) the session pin, (4) claim a fresh one. Respecting an inline
-    // tabId keeps read-only probes like `tabInfo`/`closeTab` from auto-claiming.
+    // Precedence: (1) an explicit --tab flag, (2) a tabId already in the
+    // command JSON, (3) the session pin. No pin = no guessing: claim first.
     let tabId = opts.tab ?? (typeof cmd.tabId === "number" ? cmd.tabId : null);
+    const explicit = tabId != null;
     if (tabId == null) {
       const existing = getSession(opts.session);
-      if (existing && existing.tabId != null) {
-        // Verify the pinned tab still exists; if not, fall through and re-claim.
-        const info = await request({ action: "tabInfo", tabId: existing.tabId }, opts);
-        if (info.ok && info.value) tabId = existing.tabId;
+      if (!existing || existing.tabId == null) {
+        out({ ok: false, error: "no tab for session " + opts.session + " — run claim first", hint: `node cli.js '{"action":"claim"}' --session ${opts.session}   (check the session name for typos)` });
+        return;
       }
+      tabId = existing.tabId;
     }
-    if (tabId == null) {
-      const created = await claimTab(opts);
-      tabId = created.value.tabId;
-      setSession(opts.session, { tabId, url: null, windowId: created.value.windowId ?? null, profile: opts.profile || null });
+    if (cmd.action === "upload") {
+      const paths = [].concat(cmd.path || cmd.paths || []).map(String);
+      if (!paths.length) return out({ ok: false, error: "upload needs \"path\"", hint: `{"action":"upload","ref":"p1r3","path":"/abs/file.pdf"}` });
+      const abs = paths.map((p) => path.resolve(p.replace(/^~(?=\/)/, os.homedir())));
+      const missing = abs.filter((p) => !fs.existsSync(p) || !fs.statSync(p).isFile());
+      if (missing.length) return out({ ok: false, error: "file not found: " + missing.join(", "), hint: "give an absolute path to an existing file" });
+      cmd = { ...cmd, path: abs.length === 1 ? abs[0] : abs };
+      delete cmd.paths;
     }
-    cmd = { ...cmd, tabId };
+    touchSession(opts.session);
+    cmd = { ...cmd, tabId, ...(explicit ? {} : { session: opts.session }) };
+    const res = await request(cmd, opts);
+    if (!res.ok && /tab is gone|No tab with id/i.test(String(res.error || "")) && !explicit) {
+      clearSession(opts.session);
+      out({ ok: false, error: "the tab for session " + opts.session + " was closed — run claim to get a new one", hint: `node cli.js '{"action":"claim"}' --session ${opts.session}` });
+      return;
+    }
+    return printResult(cmd, res, opts);
   }
 
   const res = await request(cmd, opts);
-  if (!res.ok) {
-    console.error(JSON.stringify({ ok: false, error: res.error, queued: res.queued, profile: res.profile }, null, 1));
-    process.exit(1);
-  }
+  return printResult(cmd, res, opts);
+}
 
+function printResult(cmd, res, opts) {
   // Remember where a navigate landed, so `guard` can pull the tab back.
-  if (cmd.action === "navigate" && cmd.tabId != null) {
+  if (cmd.action === "navigate" && res.ok && cmd.tabId != null && cmd.session) {
     const existing = getSession(opts.session);
-    setSession(opts.session, { tabId: cmd.tabId, url: cmd.url || null, windowId: existing?.windowId ?? null, profile: existing?.profile ?? null });
+    if (existing) setSession(opts.session, { ...existing, url: cmd.url || null });
   }
 
-  const value = res.value;
+  const value = res.ok ? res.value : null;
   // Persist screenshot payloads to disk and report the path.
   if (value && typeof value === "object" && value.dataUrl) {
     const format = value.format || "png";
@@ -493,19 +496,23 @@ async function run(cmd, opts) {
     const target = opts.out || path.join(shotsDir(), `${Date.now()}.${ext}`);
     const base64 = value.dataUrl.replace(/^data:image\/[^;]+;base64,/, "");
     fs.writeFileSync(target, Buffer.from(base64, "base64"));
-    console.log(JSON.stringify({
-      ok: true,
-      file: target,
-      width: value.width,
-      height: value.height,
-      source: value.source,
-      format,
-      hint: `read the image at ${target} (e.g. OCR it)`,
-    }, null, 1));
+    out({ ok: true, file: target, width: value.width, height: value.height, source: value.source, format, hint: `read the text with: ./ocr ${target}` });
     return;
   }
 
-  console.log(JSON.stringify({ ok: true, value }, null, 1));
+  // snap: compact lines by default; "full":true keeps the JSON.
+  if (cmd.action === "snap" && res.ok && value && Array.isArray(value.items) && !cmd.full) {
+    out(formatSnap(value, { filter: cmd.filter }));
+    return;
+  }
+  out(shapeReply(res));
+}
+
+// Action-specific patience: a wait or eval can legitimately take a while.
+function timeoutFor(cmd) {
+  if (cmd.action === "wait") return Math.min(Number(cmd.timeout) || 10000, 30000) + Math.min(Number(cmd.ms) || 0, 30000) + 8000;
+  if (cmd.action === "navigate") return 30000;
+  return 45000;
 }
 
 function request(cmd, opts) {
@@ -513,11 +520,19 @@ function request(cmd, opts) {
     const id = Math.floor(Math.random() * 1e9);
     const ws = new WebSocket(RELAY);
     let settled = false;
+    let opened = false;
+    const ms = timeoutFor(cmd);
     const timer = setTimeout(() => {
-      if (!settled) { settled = true; try { ws.close(); } catch {} reject(new Error("timeout — is the relay running? (node server.js)")); }
-    }, 60000);
+      if (settled) return;
+      settled = true;
+      try { ws.close(); } catch {}
+      reject(new Error(opened
+        ? `no reply from Chrome within ${Math.round(ms / 1000)}s for "${cmd.action}" (the relay is up; the page or the extension is stuck — try {"action":"status"}, then snap)`
+        : `cannot reach the Pilot relay at ${RELAY} — start it: node server.js (in the pilot folder)`));
+    }, ms);
 
     ws.on("open", () => {
+      opened = true;
       ws.send(JSON.stringify({ hello: "cli" }));
       // Auto-inject the session's pinned profile when no --profile was given,
       // so a `/bridge <profile>` claim keeps every later command in that profile.
@@ -527,7 +542,7 @@ function request(cmd, opts) {
     ws.on("message", (d) => {
       const m = JSON.parse(d.toString());
       if (m.type === "status" && cmd.action === "status") {
-        if (!settled) { settled = true; clearTimeout(timer); resolve(m); ws.close(); }
+        if (!settled) { settled = true; clearTimeout(timer); resolve({ ok: true, ...m }); ws.close(); }
         return;
       }
       if (m.id === id) {
@@ -535,7 +550,12 @@ function request(cmd, opts) {
       }
     });
     ws.on("error", (e) => {
-      if (!settled) { settled = true; clearTimeout(timer); reject(e); }
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(/ECONNREFUSED/.test(String(e.message || e.code))
+        ? `the Pilot relay is not running at ${RELAY} — start it: node server.js (in the pilot folder)`
+        : String(e.message || e)));
     });
   });
 }
@@ -545,7 +565,7 @@ function request(cmd, opts) {
   if (opts.status) return run(null, opts);
   if (opts.sessions) return run(null, opts);
   if (!opts.json) {
-    console.error("usage: node cli.js '<json command>' [--profile NAME] [--session NAME] [--tab ID] [--window ID | --here | --new-window] [--out FILE] | --status | --sessions");
+    console.error("usage: node cli.js '<json command>' [--session NAME] [--profile NAME] [--tab ID] [--window ID | --new-window] [--out FILE] | --status | --sessions");
     console.error(`try: node cli.js '{"action":"help"}'`);
     process.exit(1);
   }
@@ -553,19 +573,20 @@ function request(cmd, opts) {
   try {
     cmd = JSON.parse(opts.json);
   } catch {
-    console.error(JSON.stringify({
+    out({
       ok: false,
       error: "bad JSON: " + opts.json,
       hint: `single-quote the whole command, double-quote the keys. Example: node cli.js '{"action":"snap"}' --session myjob`,
-    }, null, 1));
+    });
     process.exit(1);
   }
   if (!cmd || typeof cmd !== "object" || !cmd.action) {
-    console.error(JSON.stringify({ ok: false, error: "command needs an \"action\" key", hint: `node cli.js '{"action":"help"}'` }, null, 1));
+    out({ ok: false, error: "command needs an \"action\" key", hint: `node cli.js '{"action":"help"}'` });
     process.exit(1);
   }
-  return run(cmd, opts);
+  await run(cmd, opts);
+  process.exitCode = exitCode;
 })().catch((e) => {
-  console.error(JSON.stringify({ ok: false, error: String(e && e.message || e) }));
+  console.log(JSON.stringify({ ok: false, error: String(e && e.message || e) }));
   process.exit(1);
 });

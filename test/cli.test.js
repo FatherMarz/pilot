@@ -134,7 +134,7 @@ test("--sessions shows staleness and the gc hint once 3+ sessions are stale", as
   assert.equal(out.sessions.a.stale, true);
   assert.equal(out.sessions.fresh.stale, false);
   assert.equal(out.sessions.a.idleMin >= 90, true);
-  assert.match(out.hint, /gc --keep/);
+  assert.match(out.hint, /node cli\.js gc/);
 
   // With fewer stale sessions than 3, no hint.
   const home2 = fs.mkdtempSync(path.join(os.tmpdir(), "pilot-home-"));
@@ -182,4 +182,112 @@ test("claim drops pins whose tab is gone and auto-releases pins idle over 24h", 
   assert.deepEqual(closed, [2], "only the idle tab is closed");
   const pins = JSON.parse(fs.readFileSync(path.join(home, ".pilot", "session.json")));
   assert.deepEqual(Object.keys(pins).sort(), ["fresh", "otherProfile", "recent"]);
+});
+
+test("a page action on an unclaimed session fails and opens no tab", async (t) => {
+  const relay = createRelay(0);
+  const port = await relay.listen(0);
+  t.after(() => relay.close());
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pilot-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const seen = [];
+  const ext = fakeExtension(port, "default", (msg) => { seen.push(msg.action); return { tabId: 5, windowId: 1 }; });
+  t.after(() => ext.close());
+  await new Promise((r) => setTimeout(r, 50));
+  for (const cmd of ['{"action":"snap"}', '{"action":"navigate","url":"https://example.com"}', '{"action":"click","ref":"p1r1"}']) {
+    const res = await runCli([cmd, "--session", "typo"], home, port);
+    assert.equal(res.ok, false);
+    assert.match(res.error, /no tab for session typo — run claim first/);
+  }
+  assert.deepEqual(seen, [], "nothing may reach the extension");
+});
+
+test("the top-level ok is the truth: value.ok, error and hint are lifted", async (t) => {
+  const relay = createRelay(0);
+  const port = await relay.listen(0);
+  t.after(() => relay.close());
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pilot-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(home, ".pilot"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".pilot", "session.json"), JSON.stringify({ s: { tabId: 3, lastUsed: Date.now() } }));
+  const ext = fakeExtension(port, "default", (msg) => {
+    if (msg.action === "click") return { ok: false, error: "no element", hint: "snap again", visibleTexts: ["Save"] };
+    return { ok: true };
+  });
+  t.after(() => ext.close());
+  await new Promise((r) => setTimeout(r, 50));
+  const res = await runCli(['{"action":"click","ref":"p1r9"}', "--session", "s"], home, port);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "no element");
+  assert.equal(res.hint, "snap again");
+  assert.deepEqual(res.value, { visibleTexts: ["Save"] });
+});
+
+test("unknown actions fail in the CLI with the nearest match", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pilot-home-"));
+  const res = await runCli(['{"action":"clik","ref":"p1r1"}', "--session", "s"], home, 1);
+  assert.equal(res.ok, false);
+  assert.match(res.hint, /did you mean "click"/);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("relay-level failures keep their hint (not connected)", async (t) => {
+  const relay = createRelay(0, { waitMs: 100 });
+  const port = await relay.listen(0);
+  t.after(() => relay.close());
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pilot-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(home, ".pilot"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".pilot", "session.json"), JSON.stringify({ s: { tabId: 3, lastUsed: Date.now() } }));
+  const res = await runCli(['{"action":"snap"}', "--session", "s"], home, port);
+  assert.equal(res.ok, false);
+  assert.match(res.error, /not connected/);
+  assert.ok(res.hint);
+});
+
+test("gc releases only stale sessions, never live ones", async (t) => {
+  const relay = createRelay(0);
+  const port = await relay.listen(0);
+  t.after(() => relay.close());
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pilot-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const released = [];
+  const ext = fakeExtension(port, "default", (msg) => {
+    if (msg.action === "releaseTab") { released.push(msg.tabId); return { ok: true, closed: [msg.tabId], ungrouped: [], leftOpen: [] }; }
+    if (msg.action === "cleanup") return { ok: true, close: [], ungroup: [] };
+    return null;
+  });
+  t.after(() => ext.close());
+  await new Promise((r) => setTimeout(r, 50));
+  fs.mkdirSync(path.join(home, ".pilot"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".pilot", "session.json"), JSON.stringify({
+    me: { tabId: 1, lastUsed: Date.now() },
+    otherLive: { tabId: 2, lastUsed: Date.now() - 5 * 60000 },
+    old: { tabId: 3, lastUsed: Date.now() - 90 * 60000 },
+  }));
+  const res = await runCli(["gc", "--session", "me"], home, port);
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.released, ["old"]);
+  assert.deepEqual(released, [3]);
+  const pins = JSON.parse(fs.readFileSync(path.join(home, ".pilot", "session.json")));
+  assert.deepEqual(Object.keys(pins).sort(), ["me", "otherLive"]);
+});
+
+test("compact snap is the CLI default; full:true keeps JSON", async (t) => {
+  const relay = createRelay(0);
+  const port = await relay.listen(0);
+  t.after(() => relay.close());
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pilot-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(home, ".pilot"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".pilot", "session.json"), JSON.stringify({ s: { tabId: 3, lastUsed: Date.now() } }));
+  const ext = fakeExtension(port, "default", () => ({ doc: 2, title: "T", url: "https://x.test/", text: "hello", items: [{ n: 0, ref: "p2r1", role: "button", name: "Save", pri: 1 }] }));
+  t.after(() => ext.close());
+  await new Promise((r) => setTimeout(r, 50));
+  const raw = await runCli(['{"action":"snap"}', "--session", "s"], home, port);
+  assert.match(raw.raw, /^ok:true page p2 "T"/);
+  assert.match(raw.raw, /\np2r1 button "Save"\n/);
+  const full = await runCli(['{"action":"snap","full":true}', "--session", "s"], home, port);
+  assert.equal(full.ok, true);
+  assert.equal(full.value.items[0].ref, "p2r1");
 });
