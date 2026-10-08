@@ -131,6 +131,7 @@ function connect() {
     } catch (e) {
       const out = { ok: false, error: friendlyError(e) };
       if (msg.tabId != null) {
+        await drainShim(msg.tabId).catch(() => {});
         const d = dialogsSince(msg.tabId, t0);
         if (d) out.dialog = d;
       }
@@ -367,7 +368,12 @@ async function inFrames(tabId, spec, fn) {
 const dbg = new Map(); // tabId -> Promise<void>
 
 chrome.debugger.onDetach.addListener((source) => {
-  if (source && source.tabId != null) dbg.delete(source.tabId);
+  if (source && source.tabId != null) {
+    dbg.delete(source.tabId);
+    // Chrome dropped the debugger (another extension's frame appeared, or
+    // DevTools took over): dialogs now need the page shim until it is back.
+    if (isDriven(source.tabId)) setShim(source.tabId, true).catch(() => {});
+  }
 });
 
 function dbgAttach(tabId) {
@@ -399,6 +405,8 @@ function dbgSend(tabId, method, params, timeoutMs) {
 
 function ensureDebugger(tabId) {
   if (dbg.has(tabId)) return dbg.get(tabId);
+  const t = tabState.get(tabId);
+  if (t && t.noCdp) return Promise.reject(new Error("debugger turned off for this tab (noDebugger test mode)"));
   const p = (async () => {
     try {
       await dbgAttach(tabId);
@@ -410,19 +418,52 @@ function ensureDebugger(tabId) {
       await new Promise((r) => chrome.debugger.detach({ tabId }, () => { void chrome.runtime.lastError; r(); }));
       await dbgAttach(tabId);
     }
+    // Focus emulation is what makes trusted input land in a background tab:
+    // without it the tab is only half usable, so a failure here detaches and
+    // fails the attach instead of leaving a half-attached tab behind.
+    try {
+      await dbgSend(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
+    } catch (e) {
+      await new Promise((r) => chrome.debugger.detach({ tabId }, () => { void chrome.runtime.lastError; r(); }));
+      throw e;
+    }
     for (const [m, prm] of [
-      ["Emulation.setFocusEmulationEnabled", { enabled: true }],
       ["Page.enable", {}], ["Runtime.enable", {}], ["Log.enable", {}], ["Network.enable", {}],
     ]) await dbgSend(tabId, m, prm).catch(() => {});
   })();
   dbg.set(tabId, p);
-  p.catch(() => dbg.delete(tabId));
+  p.catch(() => { if (dbg.get(tabId) === p) dbg.delete(tabId); });
   return p;
 }
 
-async function cdp(tabId, method, params) {
+// Reset a tab's debugger state from scratch: clear what the worker believes,
+// remove other extensions' frames (the usual reason Chrome refused), detach
+// whatever is left, attach again and re-enable focus emulation.
+async function healDebugger(tabId) {
+  await guardFrames(tabId);
+  await dbgDetach(tabId);
   await ensureDebugger(tabId);
-  return dbgSend(tabId, method, params);
+}
+
+// Attach (healing once on a refusal). Throws when the debugger stays out.
+function cdpReady(tabId) {
+  return PilotShared.withHeal(() => ensureDebugger(tabId), () => healDebugger(tabId));
+}
+
+// One debugger command; on a "not attached / refused" error the tab is
+// healed and the command sent once more (see PilotShared.withHeal).
+function cdp(tabId, method, params) {
+  return PilotShared.withHeal(
+    async () => { await ensureDebugger(tabId); return dbgSend(tabId, method, params); },
+    () => healDebugger(tabId),
+  );
+}
+
+// Keep other extensions' frames out of a driven tab's main document.
+async function guardFrames(tabId) {
+  const t = tabState.get(tabId);
+  if (t && t.noCdp) return null;
+  return pageCall(tabId, "guardExtFrames", [chrome.runtime.id], 0).catch(() => null);
 }
 
 // Chrome refuses the debugger on a tab that shows another extension's frame
@@ -439,9 +480,11 @@ function explainCdp(msg) {
 let MAC = true;
 chrome.runtime.getPlatformInfo((p) => { MAC = !!p && p.os === "mac"; });
 
-function mouse(tabId, type, x, y, modifiers) {
+function mouse(tabId, type, x, y, modifiers, held) {
   const p = { type, x, y, pointerType: "mouse", modifiers: modifiers || 0 };
-  if (type === "mouseMoved") Object.assign(p, { button: "none", buttons: 0 });
+  // held: a move with the left button down (a drag); without it Chrome never
+  // starts a drag, and nothing is intercepted.
+  if (type === "mouseMoved") Object.assign(p, held ? { button: "left", buttons: 1 } : { button: "none", buttons: 0 });
   else Object.assign(p, { button: "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: 1 });
   return cdp(tabId, "Input.dispatchMouseEvent", p);
 }
@@ -527,6 +570,54 @@ function pushConsole(s, entry) {
   s.console.push({ ...entry, at: Date.now() });
   if (s.console.length > 200) s.console.shift();
 }
+
+// ── dialog shim (no debugger) ───────────────────────────────────────────────
+// When the debugger is out (Chrome refused it, DevTools holds it, or the
+// noDebugger test switch), a real alert/confirm/prompt would block the page
+// and every call into it. In driven tabs only, Pilot then replaces
+// window.alert/confirm/prompt in the page's MAIN world (every frame, again on
+// every navigation) with non-blocking versions that follow the tab's dialog
+// policy and record what they answered, and blocks beforeunload prompts. The
+// debugger path (Page.javascriptDialogOpening) stays primary: once the
+// debugger is back the shim is taken out and the real functions restored.
+
+function shimTarget(tabId, frameId) {
+  return frameId == null ? { tabId, allFrames: true } : { tabId, frameIds: [frameId] };
+}
+
+async function setShim(tabId, on, frameId) {
+  const s = st(tabId);
+  if (!on && !s.shim) return;
+  if (frameId == null) s.shim = !!on;
+  await withTimeout(chrome.scripting.executeScript({
+    target: shimTarget(tabId, frameId), world: "MAIN", injectImmediately: true, func: PilotShared.dialogShim, args: [!!on, s.policy],
+  }), PAGE_TIMEOUT_MS, "the page");
+}
+
+// Move what the shim answered into the tab's dialog log (for the reply).
+async function drainShim(tabId) {
+  const s = tabState.get(tabId);
+  if (!s || !s.shim) return;
+  let rs = [];
+  try {
+    rs = await withTimeout(chrome.scripting.executeScript({ target: { tabId, allFrames: true }, world: "MAIN", injectImmediately: true, func: PilotShared.drainShim }), 3000, "the page");
+  } catch { return; }
+  for (const r of rs || []) {
+    for (const rec of r.result || []) {
+      const d = { ...rec, via: "page-shim" };
+      s.dialogs.push(d);
+      if (s.dialogs.length > 20) s.dialogs.shift();
+      s.lastDialog = d;
+      if (s.policy && s.policy.once) s.policy = null;
+    }
+  }
+}
+
+// Each new document in a shimmed tab gets the shim as early as possible.
+chrome.webNavigation.onCommitted.addListener((d) => {
+  const s = tabState.get(d.tabId);
+  if (s && s.shim && isDriven(d.tabId)) setShim(d.tabId, true, d.frameId).catch(() => {});
+});
 
 function dialogsSince(tabId, t0) {
   const s = tabState.get(tabId);
@@ -783,6 +874,7 @@ async function decorate(msg, value, t0) {
     }
   }
   if (expecting && expecting.tabId === tabId) expecting.until = Math.min(expecting.until, Date.now() + 1000);
+  await drainShim(tabId);
   const d = dialogsSince(tabId, t0);
   if (d) value.dialog = d;
   const opened = await openedSince(tabId, t0);
@@ -882,12 +974,23 @@ async function dispatchAction(msg) {
   const show = settings.visualFeedback;
   let trusted = settings.trustedInput;
   let cdpNote = null;
+  // Test switch: "noDebugger":true runs this tab without the debugger (as if
+  // Chrome refused it) until "noDebugger":false.
+  if (msg.noDebugger != null) {
+    st(tabId).noCdp = !!msg.noDebugger;
+    if (msg.noDebugger) await dbgDetach(tabId);
+  }
   // Attach first: dialog handling and console/network capture need it.
-  // If Chrome refuses, input falls back to simulated events.
-  try { await ensureDebugger(tabId); } catch (e) {
+  // If Chrome refuses, input falls back to simulated events and dialogs are
+  // answered by a small page shim instead.
+  await guardFrames(tabId);
+  let attached = true;
+  try { await cdpReady(tabId); } catch (e) {
+    attached = false;
     cdpNote = explainCdp(e.message) || ("debugger unavailable: " + e.message);
     trusted = false;
   }
+  await setShim(tabId, !attached).catch(() => {});
   const withNote = (r) => (cdpNote && r && typeof r === "object" && !Array.isArray(r) && /^synthetic/.test(String(r.via || "")) ? { ...r, cdpNote } : r);
 
   // Trusted click on a located element. The probe armed by locate tells us
@@ -1008,6 +1111,7 @@ async function dispatchAction(msg) {
   switch (action) {
     case "snap": return await snapAll(tabId, msg);
     case "dialog": {
+      await drainShim(tabId);
       const text = await pageCall(tabId, "dialog", []).catch(() => null);
       const s = tabState.get(tabId);
       return { ok: true, text, jsDialog: (s && s.lastDialog) || null, ...(s && s.policy ? { policy: s.policy } : {}) };
@@ -1015,6 +1119,7 @@ async function dispatchAction(msg) {
     case "dialogPolicy": {
       const s = st(tabId);
       s.policy = { accept: msg.accept !== false, ...(msg.promptText != null ? { promptText: String(msg.promptText) } : {}), ...(msg.once ? { once: true } : {}) };
+      if (s.shim) await setShim(tabId, true).catch(() => {});
       return { ok: true, policy: s.policy, lastDialog: s.lastDialog, note: "alert/confirm/prompt dialogs in this tab are now " + (s.policy.accept ? "accepted" : "dismissed") + (s.policy.once ? " (next dialog only)" : "") + "; beforeunload is always accepted" };
     }
     case "form": {
@@ -1323,14 +1428,19 @@ async function evalJs(tabId, msg) {
   const timeout = Math.min(Math.max(Number(msg.timeout) || 5000, 100), 20000);
   const run = (expr) => dbgSend(tabId, "Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true, timeout, userGesture: false, replMode: true }, timeout + 1000);
   let res;
+  let attached = false;
   try {
-    await ensureDebugger(tabId);
+    await cdpReady(tabId);
+    attached = true;
     res = await run(js);
     const ex = res && res.exceptionDetails;
     if (ex && /Illegal return|return statement/i.test(String((ex.exception && ex.exception.description) || ex.text))) {
       res = await run("(async () => {\n" + js + "\n})()");
     }
   } catch (e) {
+    // The script may already have run when the debugger dropped mid-way:
+    // never run it a second time in the page.
+    if (attached) return { ok: false, error: "eval failed: " + String(e.message || e), hint: "the debugger dropped while the script ran; it may have run — check the page before running it again" };
     // No debugger (another extension's frame, DevTools): run it in the page's
     // main world instead. The page's CSP may forbid eval there.
     try {
@@ -1425,7 +1535,7 @@ async function drag(tabId, msg, trusted, show) {
       await mouse(tabId, "mousePressed", a.x, a.y);
       const steps = 6;
       for (let i = 1; i <= steps; i++) {
-        await mouse(tabId, "mouseMoved", Math.round(a.x + (b.x - a.x) * i / steps), Math.round(a.y + (b.y - a.y) * i / steps));
+        await mouse(tabId, "mouseMoved", Math.round(a.x + (b.x - a.x) * i / steps), Math.round(a.y + (b.y - a.y) * i / steps), 0, true);
         await sleep(20);
       }
       for (let i = 0; i < 5 && !s.drag; i++) await sleep(40);
