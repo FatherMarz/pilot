@@ -92,6 +92,12 @@
   </div>
 
   <div class="field">
+    <label for="idleReleaseMinutes">Release idle agent tabs after (minutes)</label>
+    <input type="text" id="idleReleaseMinutes" placeholder="30">
+    <p class="desc">A session's tab (and the tabs it opened) is closed after this many idle minutes. A tab you are looking at is never closed, only taken out of the group. 0 turns it off.</p>
+  </div>
+
+  <div class="field">
     <label for="groupColor">Group color</label>
     <select id="groupColor">
       <option value="grey">Grey</option>

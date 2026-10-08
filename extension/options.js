@@ -11,6 +11,7 @@ const DEFAULTS = {
   screenshotMode: "auto",
   shotMaxWidth: 1280,
   shotFormat: "jpeg",
+  idleReleaseMinutes: 30,
 };
 
 function load() {
@@ -27,6 +28,7 @@ function load() {
     document.getElementById("screenshotMode").value = s.screenshotMode;
     document.getElementById("shotMaxWidth").value = s.shotMaxWidth;
     document.getElementById("shotFormat").value = s.shotFormat;
+    document.getElementById("idleReleaseMinutes").value = s.idleReleaseMinutes;
   });
 }
 
@@ -44,6 +46,7 @@ function save() {
     screenshotMode: document.getElementById("screenshotMode").value,
     shotMaxWidth: Math.max(0, parseInt(document.getElementById("shotMaxWidth").value, 10) || 0),
     shotFormat: document.getElementById("shotFormat").value,
+    idleReleaseMinutes: Math.max(0, parseInt(document.getElementById("idleReleaseMinutes").value, 10) || 0),
   };
   chrome.storage.sync.set(saved, () => {
     chrome.runtime.sendMessage({ type: "settings-updated" });
