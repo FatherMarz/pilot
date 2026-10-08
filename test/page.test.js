@@ -2,7 +2,7 @@
 // against tiny element fakes (no DOM needed).
 const { test } = require("node:test");
 const assert = require("node:assert");
-const { accessibleName, roleOf, textMatches } = require("../extension/page.js");
+const { accessibleName, roleOf, textMatches, parseRef, validateValue, fieldError, isMissing } = require("../extension/page.js");
 
 function el(tagName, attrs = {}, extra = {}) {
   const e = {
@@ -78,6 +78,8 @@ test("roles", () => {
   assert.equal(roleOf(el("SELECT")), "combobox");
   assert.equal(roleOf(el("DIV", { role: "option" })), "option");
   assert.equal(roleOf(el("DIV", {}, { isContentEditable: true })), "textbox");
+  assert.equal(roleOf(el("INPUT", { type: "file" })), "file");
+  assert.equal(roleOf(el("INPUT", { type: "number" })), "spinbutton");
 });
 
 test("value-stuck check tolerates input masks only", () => {
@@ -87,4 +89,70 @@ test("value-stuck check tolerates input masks only", () => {
   assert.ok(!textMatches("", "hello"));
   assert.ok(!textMatches("hel", "hello"));
   assert.ok(textMatches("", ""));
+});
+
+test("refs carry the page number; old and foreign refs are recognised", () => {
+  assert.deepEqual(parseRef("p4r12"), { doc: 4, seq: 12 });
+  assert.deepEqual(parseRef(" p10r1 "), { doc: 10, seq: 1 });
+  assert.deepEqual(parseRef("r12"), { legacy: true });
+  assert.equal(parseRef("Password"), null);
+  assert.equal(parseRef("p4"), null);
+  assert.equal(parseRef(null), null);
+});
+
+test("typed values are checked before the field is touched", () => {
+  const bad = validateValue("number", "abc");
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /not a valid number.*left unchanged/);
+  assert.deepEqual(validateValue("number", "42"), { ok: true, value: "42" });
+  assert.deepEqual(validateValue("number", " -3.5e2 "), { ok: true, value: "-3.5e2" });
+  assert.deepEqual(validateValue("number", "+7"), { ok: true, value: "7" });
+  assert.equal(validateValue("number", "4 2").ok, false);
+  assert.deepEqual(validateValue("number", ""), { ok: true, value: "" });
+
+  assert.deepEqual(validateValue("time", "14:30"), { ok: true, value: "14:30" });
+  assert.deepEqual(validateValue("time", "9:05"), { ok: true, value: "09:05" });
+  assert.deepEqual(validateValue("time", "2:30 PM"), { ok: true, value: "14:30" });
+  assert.deepEqual(validateValue("time", "12 am"), { ok: true, value: "00:00" });
+  assert.deepEqual(validateValue("time", "14:30:15"), { ok: true, value: "14:30:15" });
+  assert.equal(validateValue("time", "25:00").ok, false);
+  assert.equal(validateValue("time", "noon").ok, false);
+
+  assert.deepEqual(validateValue("date", "2026-10-08"), { ok: true, value: "2026-10-08" });
+  assert.equal(validateValue("date", "2026-02-30").ok, false);
+  assert.deepEqual(validateValue("date", "2024-02-29"), { ok: true, value: "2024-02-29" });
+  assert.match(validateValue("date", "10/08/2026").error, /YYYY-MM-DD/);
+  assert.deepEqual(validateValue("datetime-local", "2026-10-08 9:30"), { ok: true, value: "2026-10-08T09:30" });
+  assert.deepEqual(validateValue("month", "2026-10"), { ok: true, value: "2026-10" });
+  assert.equal(validateValue("month", "2026-13").ok, false);
+  assert.deepEqual(validateValue("week", "2026-w41"), { ok: true, value: "2026-W41" });
+  assert.deepEqual(validateValue("color", "#FF8800"), { ok: true, value: "#ff8800" });
+  assert.deepEqual(validateValue("color", "f80"), { ok: true, value: "#ff8800" });
+  assert.equal(validateValue("color", "orange").ok, false);
+  assert.equal(validateValue("range", "").ok, false);
+  assert.deepEqual(validateValue("text", "anything"), { ok: true, value: "anything" });
+});
+
+test("form errors: only messages tied to the field count", () => {
+  const msgEl = { innerText: "Enter a valid email" };
+  const lookup = (id) => (id === "em-err" ? msgEl : null);
+  // aria-invalid + aria-errormessage
+  const a = el("INPUT", { type: "email", "aria-invalid": "true", "aria-errormessage": "em-err" });
+  assert.equal(fieldError(a, lookup), "Enter a valid email");
+  // aria-describedby is only an error when the field is invalid
+  const helpText = el("INPUT", { type: "email", "aria-describedby": "em-err" });
+  assert.equal(fieldError(helpText, lookup), "");
+  // native constraint failure on a filled field
+  const n = el("INPUT", { type: "email" }, { validity: { valid: false, valueMissing: false }, validationMessage: "Please include an '@'" });
+  assert.equal(fieldError(n, lookup), "Please include an '@'");
+  // a required empty field is "missing", not an error
+  const req = el("INPUT", { type: "text" }, { validity: { valid: false, valueMissing: true }, validationMessage: "Please fill out this field." });
+  assert.equal(fieldError(req, lookup), "");
+  assert.equal(isMissing(req), true);
+  // mat-error inside the field's own mat-form-field
+  const mff = { querySelector: () => ({ innerText: "Name is required" }) };
+  const m = el("INPUT", { type: "text" }, { closest: (s) => (s.includes("mat-form-field") ? mff : null) });
+  assert.equal(fieldError(m, lookup), "Name is required");
+  // a valid field with no signals has no error
+  assert.equal(fieldError(el("INPUT", { type: "text" }, { validity: { valid: true } }), lookup), "");
 });
