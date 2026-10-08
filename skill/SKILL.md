@@ -110,14 +110,14 @@ node cli.js --sessions                            # list every session's pinned 
 
 - Different `--session` per task (e.g. `chatgpt`, `checkout`) — two jobs never collide.
 - `--tab ID` drives one specific tab for a single command without touching the pin.
-- Same window, different tabs: separate sessions. Different windows: `claim --new-window`.
+- Same window, different tabs: separate sessions. Own agent window: `claim --new-window`.
   Different Chrome profiles: `--profile work` vs `--profile personal`.
 - Hard limit: one debugger per tab (Chrome's rule). Two agents must not drive the
   SAME tab at once; own sessions → no contention.
 - Every `claim` drops pins whose tab is gone and auto-releases sessions idle >24h.
-- Driven tabs sit in a yellow "Pilot" tab group. Default claim opens one unfocused
-  agent window per profile; `--here` puts the tab in the focused window as a
-  background tab. Either way Pilot never brings it forward.
+- Driven tabs sit in a yellow "Pilot" tab group. Default claim puts the tab in the
+  window Marcello is using, as a background tab; `--new-window` uses one unfocused
+  agent window per profile instead. Either way Pilot never brings it forward.
 
 ## Reading screenshots — no API key needed
 

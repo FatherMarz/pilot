@@ -16,8 +16,8 @@
 //   --session NAME      use the pinned tab for NAME (default "default")
 //   --tab ID            override: drive this exact tab id this once
 //   --window ID         share that existing window instead of the profile window
-//   --here              share the window that is focused NOW
-//   --new-window        force a brand-new window for this claim
+//   --here              share the window that is focused NOW (the default)
+//   --new-window        use the profile's own agent window, not the user's
 //   --sessions          print the tab pins and per-profile windows
 //   claim               (action) get/claim a dedicated tab and print its id
 //   release             (action) close the pinned tab and forget it
@@ -230,14 +230,15 @@ function saveWindows(windows) {
   fs.writeFileSync(windowsFile(), JSON.stringify(windows, null, 1));
 }
 
-// Create a dedicated tab for a session. Default: the profile's shared agent
-// window (first claim in the profile creates it; later claims add their own
-// tab to it). --window / --here opt into sharing a specific window instead.
+// Create a dedicated tab for a session. Default: a background tab in the
+// window the user is in, which Pilot never brings forward. --window picks a
+// window, --new-window uses the profile's own agent window instead (first claim
+// creates it, later ones add a tab). With no focused window, the agent window.
 async function claimTab(opts) {
   let windowId = opts.window;
-  if (opts.here && windowId == null) {
-    const active = await request({ action: "activeTab" }, opts);
-    if (active.ok && active.value) windowId = active.value.windowId;
+  if (windowId == null && !opts.newWindow) {
+    const active = await request({ action: "activeTab" }, opts).catch(() => null);
+    if (active && active.ok && active.value) windowId = active.value.windowId;
   }
   if (windowId == null) {
     const profileKey = opts.profile || "default";

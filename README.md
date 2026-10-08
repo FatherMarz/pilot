@@ -89,11 +89,11 @@ node cli.js '{"action":"help"}'   # full command list with examples
 ### Sessions — one tab per agent
 
 Every agent passes `--session NAME`. The first command with a new session
-claims a dedicated tab (in a shared per-profile agent window) and pins it on
-disk; later commands drive that same tab, so two agents never hijack each
-other. `--profile NAME` picks the connected Chrome profile. `--new-window`
-forces a fresh window, `--here` shares the focused one, `--window ID` a
-specific one. `--tab ID` overrides the pin for one call.
+claims a dedicated tab (a background tab in the window you are using) and
+pins it on disk; later commands drive that same tab, so two agents never
+hijack each other. `--profile NAME` picks the connected Chrome profile.
+`--new-window` uses a separate per-profile agent window instead, `--window ID`
+a specific one. `--tab ID` overrides the pin for one call.
 
 Claim is frugal by default: it reuses your pinned tab, then **adopts the tab
 of an idle session** (same profile, idle 30+ min, blank tabs first) instead of
