@@ -1434,11 +1434,15 @@ async function evalJs(tabId, msg) {
   try {
     await cdpReady(tabId);
     attached = true;
-    res = await run(js);
-    const ex = res && res.exceptionDetails;
-    if (ex && /Illegal return|return statement/i.test(String((ex.exception && ex.exception.description) || ex.text))) {
-      res = await run("(async () => {\n" + js + "\n})()");
+    // REPL mode swallows a top-level `return` and answers {}. Compile the
+    // script plainly first; if `return` makes it invalid, run it as a body.
+    let code = js;
+    if (/\breturn\b/.test(js)) {
+      const c = await dbgSend(tabId, "Runtime.compileScript", { expression: js, sourceURL: "", persistScript: false }, timeout + 1000).catch(() => null);
+      // REPL mode does not unwrap a returned promise, so await it in the script.
+      if (c && c.exceptionDetails) code = "await (async () => {\n" + js + "\n})()";
     }
+    res = await run(code);
   } catch (e) {
     // The script may already have run when the debugger dropped mid-way:
     // never run it a second time in the page.
